@@ -824,6 +824,14 @@ function ShotTimeline({ project, assets, selId, onSelect, onSplit, onPlayCut, ac
   );
 }
 
+/** Cap on reference images per shot - mirrors MAX_REFS in ImagesView. */
+const MAX_SHOT_REFS = 8;
+
+/** True when a drag carries OS files (not a tile being reordered, not a text selection). */
+function dragHasFiles(e: React.DragEvent): boolean {
+  return !!e.dataTransfer && Array.from(e.dataTransfer.types ?? []).includes("Files");
+}
+
 function TimelineTile({ shot, index, width, thumbH, assets, selected, dragging, structing, onSelect, onPointerDown, onResizeStart, onSplit, onRender, onDuplicate, onDelete, activeJob, onAcceptTake, onStructClick, onStructMenu, onSetStillMode }: {
   shot: Shot;
   index: number;
@@ -868,6 +876,64 @@ function TimelineTile({ shot, index, width, thumbH, assets, selected, dragging, 
   const { renderBlocked } = useUi();
   const currentMode: "t2i" | "i2i" | "none" = shot.still?.mode ?? "none";
 
+  // ---------- drop an image straight onto this shot ----------
+  // Dragging a file in from Explorer used to fall through to the app-wide handler in
+  // <App> and land in the Library with no link to the shot you aimed at. Now the tile
+  // is a real drop target: the file is uploaded, then attached to THIS shot.
+  //
+  // stopPropagation() on the drop is what keeps the window-level handler in <App> from
+  // uploading the same file a second time - the same reason DropZone stops it.
+  const [dropping, setDropping] = useState(false);
+  const dropDepth = useRef(0);
+  const { toast, refreshAll, mutateShot } = useUi();
+
+  const onFilesDropped = async (list: FileList | null) => {
+    if (!list) return;
+    const files = Array.from(list);
+    if (!files.length) return;
+    const images = files.filter((f) => f.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp)$/i.test(f.name));
+    const others = files.filter((f) => !images.includes(f));
+    if (others.length) toast(`Only images can be dropped on a shot — skipped: ${others.map((f) => f.name).join(", ")}`, "err");
+    if (!images.length) return;
+
+    const uploaded: string[] = [];
+    for (const f of images) {
+      try {
+        const a = await api.uploadAsset(f);
+        uploaded.push(a.id);
+      } catch (e) {
+        toast(`Upload of ${f.name} failed: ${(e as Error).message}`, "err");
+      }
+    }
+    if (!uploaded.length) return;
+    await refreshAll();
+
+    if (shot.kind === "r2v") {
+      // r2v drives the engine from its reference list, so the images go there.
+      const added = uploaded.filter((id) => !shot.imageIds.includes(id));
+      if (added.length) mutateShot(shot.id, { imageIds: [...shot.imageIds, ...added].slice(0, MAX_SHOT_REFS) });
+      toast(added.length
+        ? `Added ${added.length} reference image${added.length === 1 ? "" : "s"} to "${shot.name || "Untitled"}"`
+        : "Those images are already references on this shot");
+      return;
+    }
+
+    // Everything else takes the first image as its start frame. A t2v shot with a start
+    // image is really i2v, and an explicit image must beat seamless chaining - the same
+    // two rules the server applies in useStillAsFirstFrame.
+    const [first, ...rest] = uploaded;
+    const patch: Partial<Shot> = { firstFrameId: first, continueFromPrev: false };
+    if (shot.kind === "t2v") patch.kind = "i2v";
+    if (rest.length) {
+      const added = rest.filter((id) => !shot.imageIds.includes(id));
+      if (added.length) patch.imageIds = [...shot.imageIds, ...added].slice(0, MAX_SHOT_REFS);
+    }
+    mutateShot(shot.id, patch);
+    toast(rest.length
+      ? `Set the first frame of "${shot.name || "Untitled"}" and added ${rest.length} more as reference${rest.length === 1 ? "" : "s"}`
+      : `Set as the first frame of "${shot.name || "Untitled"}"`);
+  };
+
   const compact = width < 190; // too narrow for the full three-button mode switcher
   const nextMode: "t2i" | "i2i" | "none" = currentMode === "t2i" ? "i2i" : currentMode === "i2i" ? "none" : "t2i";
   const modeShort = currentMode === "t2i" ? "T2I" : currentMode === "i2i" ? "I2I" : "Vid";
@@ -875,10 +941,38 @@ function TimelineTile({ shot, index, width, thumbH, assets, selected, dragging, 
 
   return (
     <div
-      className={`tl-tile ${selected ? "sel" : ""} ${shot.continueFromPrev ? "chained" : ""} ${dragging ? "tl-drag" : ""}`}
+      className={`tl-tile ${selected ? "sel" : ""} ${shot.continueFromPrev ? "chained" : ""} ${dragging ? "tl-drag" : ""} ${dropping ? "tl-file-over" : ""}`}
       style={{ width, "--tl-thumb-h": `${thumbH}px` } as React.CSSProperties}
       onClick={() => onSelect(shot.id)}
       onPointerDown={onPointerDown}
+      onDragEnter={(e) => {
+        if (!dragHasFiles(e)) return;
+        e.preventDefault();
+        e.stopPropagation(); // don't let the window overlay take over the whole screen
+        dropDepth.current++;
+        setDropping(true);
+      }}
+      onDragOver={(e) => {
+        if (!dragHasFiles(e)) return;
+        e.preventDefault(); // without this the browser refuses the drop
+        e.stopPropagation();
+        if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+      }}
+      onDragLeave={(e) => {
+        if (!dragHasFiles(e)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        dropDepth.current = Math.max(0, dropDepth.current - 1);
+        if (dropDepth.current === 0) setDropping(false);
+      }}
+      onDrop={(e) => {
+        // Always swallow the drop, files or not, so the window handler can't also act.
+        e.preventDefault();
+        e.stopPropagation();
+        dropDepth.current = 0;
+        setDropping(false);
+        if (dragHasFiles(e)) void onFilesDropped(e.dataTransfer.files);
+      }}
       title={`${index + 1}. ${shot.name || "Untitled"} — ${fmtDur(shot.seconds)}${shot.continueFromPrev ? " · continues from previous shot's final frame" : ""}\nDrag to reorder · drag the right edge to change the length (1–12s)`}
     >
       {/* Control row lives ABOVE the frame, never on top of it: the mode switcher and
@@ -959,6 +1053,12 @@ function TimelineTile({ shot, index, width, thumbH, assets, selected, dragging, 
           </div>
         )}
         <div className="tl-resize" title="Drag to change the duration (1–12s)" onPointerDown={onResizeStart} />
+        {dropping && (
+          <div className="tl-file-hint">
+            <span className="tl-file-hint-icon">🖼</span>
+            <span>{shot.kind === "r2v" ? "Add as reference" : "Set as first frame"}</span>
+          </div>
+        )}
       </div>
       <div className="tl-info">
         <span className="tl-name">{index + 1}. {shot.name || "Untitled"}</span>

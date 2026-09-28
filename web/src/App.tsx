@@ -127,6 +127,9 @@ export default function App() {
       dropDepth.current++;
       setDropping(true);
     };
+    // A shot tile is its own drop target and calls stopPropagation on dragenter, so
+    // this never fires for a file hovering a tile - which is what keeps the full-screen
+    // "Drop to add to the Library" veil from covering the tile that is about to receive it.
     const onLeave = (e: DragEvent) => {
       if (!hasFiles(e)) return;
       dropDepth.current = Math.max(0, dropDepth.current - 1);

@@ -17,7 +17,13 @@ session, even a small one - a future session should start by reading the top two
 
 ## CURRENT STATUS
 
-**As of 2026-09-28 18:15**
+**As of 2026-09-28 19:40**
+
+- OK **Drop an image straight onto a shot tile**: files dragged in from Explorer now attach to
+  *that* shot instead of falling through to the Library. First frame for t2v/i2v/fl2v (and the
+  kind flips t2v→i2v, `continueFromPrev` cleared), reference list for r2v. Hovering a tile
+  highlights it and says which of the two will happen. Verified in a real browser on both
+  branches; exactly one upload, no cross-shot leakage.
 
 - OK **Timeline geometry re-verified** by a real pass/fail harness: every zoom step 28→128 px/s
   has each ruler label over its own tile, and a narrow-viewport drop leaves scroll legal with
@@ -40,6 +46,48 @@ session, even a small one - a future session should start by reading the top two
 ---
 
 ## SESSION LOG
+
+### 2026-09-28 (later) — Drag an image from Explorer onto a shot
+
+**Requested:** "I should be able to drag and drop the images directly into the shots."
+
+**Before:** tiles were not drop targets at all. A file dragged over the timeline hit the
+app-wide window handler in `App.tsx` and landed in the Library with no link to the shot the
+pointer was aimed at. The "use as first frame" flow only existed in the Images tab
+(`ImagesView.tsx:130`).
+
+**Now** (`web/src/views.tsx`, `TimelineTile`):
+- The tile is a real drop target. The file is uploaded via `api.uploadAsset`, then attached
+  to **that** shot: `firstFrameId` for `t2v`/`i2v`/`fl2v`, with `kind` flipped `t2v`→`i2v`
+  and `continueFromPrev` cleared, because an explicit start image must beat seamless
+  chaining. Those are the same two rules the server applies in `useStillAsFirstFrame`
+  (`backend/src/queue.ts:609`).
+- `r2v` shots get the images in `imageIds` instead — that kind drives the engine from its
+  reference list, so a first frame would be the wrong slot. Capped at `MAX_SHOT_REFS` (8),
+  mirroring `MAX_REFS` in `ImagesView`.
+- Extra images in one drop fill the reference list rather than being silently dropped.
+- Non-image files are refused by name instead of being quietly mis-filed.
+- Hovering a tile highlights it with a ring and an explicit **"Set as first frame"** /
+  **"Add as reference"** label, so the outcome is stated before you let go.
+
+**Two details that are easy to get wrong and were handled explicitly:**
+- `stopPropagation()` on dragenter/dragover/dragleave/drop. Without it the window-level
+  handler in `<App>` uploads the same file a **second** time. Same reason `DropZone` stops
+  it. The drop test asserts the library grew by exactly 1, which is what would catch a
+  regression here.
+- Because the tile stops propagation, the full-screen "Drop to add to the Library" veil
+  never appears while you are over a tile — otherwise it covers the very tile that is about
+  to receive the file and contradicts what will happen.
+
+**Verified** with throwaway Playwright scripts driving real `DragEvent`s with a real `File`:
+hover affordance appears; a drop on an `i2v` shot set its `firstFrameId` and left
+`continueFromPrev` false; a drop on the `r2v` shot added a reference and left `firstFrameId`
+null and `kind` `r2v`; library grew by exactly 1 in both cases; no other shot changed; a
+`.mp4` drop produced a visible error toast; no page errors. **All test data was then removed
+through the API** — both projects restored to their pre-test state and the library back to
+its baseline of 10 assets, confirmed by reading both projects and the asset list back.
+`npm run typecheck` (both workspaces) and `npm run build` clean, and `verify:timeline` still
+PASSes.
 
 ### 2026-09-28 — Timeline verified for real, project sticks across reloads, git started
 

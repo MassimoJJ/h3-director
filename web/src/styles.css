@@ -600,6 +600,34 @@ body.tl-resizing-v {
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
   z-index: 5;
 }
+/* A file is being dragged over this tile: it will attach to THIS shot, not the Library.
+   The accent ring replaces the "selected" ring so the two states never look alike. */
+.tl-tile.tl-file-over {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent), 0 8px 24px rgba(77, 163, 255, 0.35);
+  z-index: 6;
+}
+.tl-file-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: rgba(12, 22, 38, 0.88);
+  color: #cfe0f5;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+  padding: 4px;
+  pointer-events: none;
+  z-index: 3;
+}
+.tl-file-hint-icon {
+  font-size: 20px;
+  line-height: 1;
+}
 .tl-empty {
   display: flex;
   align-items: center;
