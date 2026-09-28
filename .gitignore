@@ -1,0 +1,10 @@
+node_modules/
+data/
+.tmp/
+tmp/
+logs/
+dist/
+*.log
+.env
+desktop.ini
+comfy_history.json
