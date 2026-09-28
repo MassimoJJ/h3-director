@@ -187,6 +187,34 @@ async function launch() {
     };
   }, [GAP]);
 
+  // The drop really does commit: onReorder POSTs /reorder, so a test that reorders and
+  // never restores would shuffle the user's shot list on every run. Capture the real
+  // order up front and put it back through the API afterwards.
+  const projectId = await sel.inputValue().catch(() => "");
+  const apiBase = TARGET.replace(/\/$/, "");
+  const originalShotIds = await (async () => {
+    try {
+      const r = await page.request.get(apiBase + "/api/projects/" + projectId);
+      return (await r.json()).shots.map((s) => s.id);
+    } catch {
+      return [];
+    }
+  })();
+  const restoreOrder = async () => {
+    try {
+      const r = await page.request.post(apiBase + "/api/projects/" + projectId + "/reorder", {
+        data: { shotIds: originalShotIds },
+      });
+      if (!r.ok()) return "reorder restore returned HTTP " + r.status();
+      const now = (await (await page.request.get(apiBase + "/api/projects/" + projectId)).json())
+        .shots.map((s) => s.id);
+      return JSON.stringify(now) === JSON.stringify(originalShotIds) ? null : "restored order still does not match: " + JSON.stringify(now);
+    } catch (e) {
+      return "could not restore order: " + e.message;
+    }
+  };
+  console.log("ORDER  original shotIds=" + JSON.stringify(originalShotIds));
+
   let v0 = await vis();
   const a = await page.locator(".tl-tile").nth(0).boundingBox();
   const b = await page.locator(".tl-tile").nth(1).boundingBox();
@@ -222,18 +250,15 @@ async function launch() {
     if (!sInView) fail("after drop: the moved tile settled off-screen (" + JSON.stringify(sM) + " in " + settled.vp + "px)");
     await page.screenshot({ path: OUT + "02-narrow-drop.png" });
 
-    // Put the sequence back the way we found it.
-    const c = await page.locator(".tl-tile").nth(1).boundingBox();
-    const d = await page.locator(".tl-tile").nth(0).boundingBox();
-    await page.mouse.move(c.x + c.width / 2, c.y + 20);
-    await page.mouse.down();
-    await page.mouse.move(d.x + 8, d.y + 20, { steps: 15 });
-    await sleep(120);
-    await page.mouse.up();
-    await sleep(600);
+    // Restore the exact original order via the API. A second "drag it back" is a ROTATION,
+    // not an inverse, and left the shots permuted on every run. The browser still paints
+    // the dragged order until the next poll, so check the SERVER, not the DOM.
+    const restoreErr = await restoreOrder();
     v1 = await vis();
-    console.log("REVERT order=" + JSON.stringify(v1.order) + " scroll=" + v1.scrollLeft + "/" + v1.scrollMax);
-    if (JSON.stringify(v1.order) === JSON.stringify(v0.order)) fail("reorder was not reverted back to the original order");
+    console.log("REVERT painted order=" + JSON.stringify(v1.order) + " scroll=" + v1.scrollLeft + "/" + v1.scrollMax);
+    if (restoreErr) fail("the drag's reorder was not undone: " + restoreErr);
+    else console.log("REVERT restored the original order via /reorder");
+    if (restoreErr) fail("reorder was not reverted back to the original order");
   } else {
     console.log("DROP   SKIPPED - track does not overflow at this viewport (scrollMax=" + v0.scrollMax + ")");
     fail("narrow-viewport drop never ran: the track did not overflow, so the scroll fix is untested");
@@ -248,12 +273,20 @@ async function launch() {
   await sleep(3000);
   const afterProject = await sel.inputValue().catch(() => "");
   const afterZoom = await page.locator(".tl-zval").textContent().catch(() => "");
+  const afterOrder = await page.evaluate(() =>
+    [...document.querySelectorAll(".tl-tile")].map((t) => (t.querySelector(".tl-name") || { textContent: "?" }).textContent.trim()));
   console.log("RELOAD project " + JSON.stringify(beforeProject) + " -> " + JSON.stringify(afterProject)
     + "  zoom " + JSON.stringify(beforeZoom) + " -> " + JSON.stringify(afterZoom));
   if (!beforeProject) fail("no project was selected to test reload persistence");
   else if (afterProject !== beforeProject) fail("reload lost the open project (" + beforeProject + " -> " + afterProject + ")");
   if (afterZoom !== beforeZoom) fail("reload lost the timeline zoom (" + beforeZoom + " -> " + afterZoom + ")");
   if ((await page.locator(".tl-tile").count()) < 2) fail("after reload the timeline is empty");
+  // Final safety net: whatever happened above, the run must leave the shot order as found.
+  if (v0 && JSON.stringify(afterOrder) !== JSON.stringify(v0.order)) {
+    const err = await restoreOrder();
+    if (err) fail("timeline order left changed by this run (" + JSON.stringify(v0.order) + " -> " + JSON.stringify(afterOrder) + "); " + err);
+    else console.log("REVERT final safety net restored the order to " + JSON.stringify(v0.order));
+  }
   await page.screenshot({ path: OUT + "03-after-reload.png" });
 
   if (errors.length) { for (const e of errors.slice(0, 8)) fail(e); }
