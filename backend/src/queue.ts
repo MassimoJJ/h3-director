@@ -5,8 +5,8 @@ import { ComfyClient } from "./comfy";
 import { nodePresence, renderShot, resolveEngineModels } from "./engine";
 import { renderImage } from "./qwen";
 import { concatVideos, extractLastFrame, probeVideo } from "./ffmpeg";
-import { cacheDir, exportsDir, getProject, saveProject, upsertExportJob, upsertRenderJob, acceptedTakeOf, addAsset, getAsset } from "./store";
-import { DATA_DIR } from "./settings";
+import { cacheDir, exportsDir, getProject, saveProject, upsertExportJob, upsertRenderJob, acceptedTakeOf, addAsset, getAsset, appendShotTake, appendStillTake, mutateShotOnDisk } from "./store";
+import { DATA_DIR, appendJobLog } from "./settings";
 import type { AppSettings, ExportJob, ImageBoard, ImageJob, ImageTake, LibraryAsset, Project, RenderJob, Shot, ShotStill, Take } from "./types";
 
 export type BusFn = (event: { type: string; projectId?: string; jobId?: string; data?: unknown }) => void;
@@ -14,6 +14,14 @@ export type BusFn = (event: { type: string; projectId?: string; jobId?: string; 
 interface PendingImage {
   projectId: string;
   boardId: string;
+  count: number;
+  job: ImageJob;
+}
+
+/** A shot's own still stage, queued so it serializes against other GPU work. */
+interface PendingShotStill {
+  projectId: string;
+  shotId: string;
   count: number;
   job: ImageJob;
 }
@@ -36,11 +44,19 @@ const absolute = (dataRel: string) => (path.isAbsolute(dataRel) ? dataRel : path
 const CANCELLED: RenderJob["status"] = "cancelled";
 const OK: RenderJob["status"] = "ok";
 
+/** The shots a job will render, in timeline order. */
+function ordered0(project: Project, job: RenderJob): Shot[] {
+  return project.shots.filter((s) => job.shotIds.length === 0 || job.shotIds.includes(s.id));
+}
+
 export class Director {
   private renderQueue: PendingRender[] = [];
   private exportQueue: PendingExport[] = [];
   private imageQueue: PendingImage[] = [];
+  private shotStillQueue: PendingShotStill[] = [];
   private imageJobs = new Map<string, ImageJob>();
+  /** Which worker owns each queued image job: a stills board, or a shot's still stage. */
+  private imageJobKinds = new Map<string, "board" | "shotStill">();
   private activeRender: RenderJob | null = null;
   private activeExport: ExportJob | null = null;
   private activeImage: ImageJob | null = null;
@@ -103,6 +119,10 @@ export class Director {
     job.status = "running";
     job.error = undefined;
     upsertRenderJob(job);
+    appendJobLog(job.id, "info", `Render started: ${ordered0(project, job).length} shot(s)${forceChain ? ", chained" : ""}`, {
+      projectId,
+      shots: ordered0(project, job).map((s) => s.id),
+    });
     this.emit("job", projectId, job.id, job);
 
     const settings = this.getSettings();
@@ -252,12 +272,31 @@ export class Director {
             warnings: result.warnings,
           },
         };
-        shot.takes.push(take);
-        saveProject(project);
+        // Append through the store rather than saveProject(project): the local
+        // `project` is a snapshot from the start of the job, so writing it back
+        // would revert every prompt/duration edit made while this job ran.
+        const fresh = appendShotTake(projectId, shot.id, take);
+        // Keep our local copy in step with what was just persisted, so the next
+        // shot's still-stage write merges onto the new state instead of stale one.
+        if (fresh) {
+          const i2 = fresh.shots.findIndex((s) => s.id === shot.id);
+          if (i2 >= 0) ordered[i] = fresh.shots[i2];
+        }
         st.status = "ok";
         st.takeId = take.id;
         rendered++;
         job.takeCount = rendered;
+
+        // The durable record of this take: seed, prompt and any warnings, kept
+        // even if the browser is long gone by the time you look for it.
+        appendJobLog(job.id, "ok", `[${shot.name}] rendered`, {
+          shotId: shot.id,
+          takeId: take.id,
+          seed,
+          promptId: take.promptId,
+          compiledPrompt: result.compiledPrompt,
+          warnings: result.warnings.length ? result.warnings : undefined,
+        });
 
         // Prepare the seam for the NEXT shot when that shot will chain from this one.
         chainFrameAbs = null;
@@ -276,15 +315,27 @@ export class Director {
       } catch (e) {
         chainFrameAbs = null;
         const msg = e instanceof Error ? e.message : String(e);
-        shot.takes.push({
+        // Same reload-and-merge as the success path — an error take must never
+        // be the reason your other edits get rolled back.
+        //
+        // promptId is recorded on the ERROR path too (it used to be omitted, so
+        // a failed take could not be traced back to /history/<id>).
+        const freshErr = appendShotTake(projectId, shot.id, {
           id: crypto.randomUUID().slice(0, 8),
           seed: shot.seedMode === "fixed" ? shot.seed : 0,
           createdAt: Date.now(),
           status: "error",
           error: msg,
+          promptId: /prompt ([0-9a-f-]{8,})/.exec(msg)?.[1],
           accepted: false,
         });
-        saveProject(project);
+        // Write it where it will still be there tomorrow: the WebSocket log
+        // lines only exist in the browser, and vanish on restart.
+        appendJobLog(job.id, "error", `[${shot.name}] ${msg}`, { shotId: shot.id, promptId: /prompt ([0-9a-f-]{8,})/.exec(msg)?.[1] });
+        if (freshErr) {
+          const i2 = freshErr.shots.findIndex((s) => s.id === shot.id);
+          if (i2 >= 0) ordered[i] = freshErr.shots[i2];
+        }
         st.status = "error";
         st.error = msg;
         this.emit("shotDone", projectId, job.id, { shotId: shot.id, error: msg, project });
@@ -296,6 +347,11 @@ export class Director {
     const anyOk = ordered.some((s) => job.perShot[s.id]?.status === OK);
     job.status = anyOk ? "done" : "error";
     if (!anyOk) job.error = "No shots rendered successfully — see per-shot errors.";
+    appendJobLog(job.id, job.status, `Render finished: ${rendered} take(s)`, {
+      projectId,
+      status: job.status,
+      error: job.error,
+    });
   }
 
   async cancelRender(jobId: string): Promise<boolean> {
@@ -338,23 +394,84 @@ export class Director {
     };
     this.imageQueue.push({ projectId, boardId, count, job });
     this.imageJobs.set(job.id, job);
+    this.imageJobKinds.set(job.id, "board");
+    this.pruneImageJobs();
     this.emit("imageJob", projectId, job.id, job);
     void this.pumpImage();
     return job;
   }
 
+  /**
+   * Queue a single shot's still stage through the same serial pump as every other
+   * GPU job, and return immediately.
+   *
+   * This used to `await renderShotStill(...)` on the request thread. That had two
+   * real consequences: the browser request hung for the whole (multi-minute)
+   * render, and — because the only concurrency guard lives in `pumpImage` — a
+   * second click, or a still click during a video render, put two jobs on the GPU
+   * at once and could OOM the card. Going through the queue makes stills serialize
+   * against images, videos and exports exactly like everything else.
+   */
+  enqueueShotStill(projectId: string, shotId: string, count = 1): ImageJob {
+    const project = getProject(projectId);
+    const shot = project?.shots.find((s) => s.id === shotId);
+    const job: ImageJob = {
+      id: crypto.randomUUID().slice(0, 8),
+      projectId,
+      boardId: shotId,
+      boardName: shot ? `${shot.name || "Shot"} — still` : "Shot still",
+      status: "queued",
+      progress: { pct: 0, label: "Queued" },
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    this.shotStillQueue.push({ projectId, shotId, count, job });
+    this.imageJobs.set(job.id, job);
+    this.imageJobKinds.set(job.id, "shotStill");
+    this.pruneImageJobs();
+    this.emit("imageJob", projectId, job.id, job);
+    void this.pumpImage();
+    return job;
+  }
+
+  /**
+   * `imageJobs` only ever grew, was returned unpaginated by /api/image-jobs and
+   * vanished on restart, so a long session accumulated every still job ever made.
+   * Cap it, never dropping a job that is still queued or running.
+   */
+  private pruneImageJobs() {
+    const MAX_JOBS = 200;
+    if (this.imageJobs.size <= MAX_JOBS) return;
+    const live = new Set<string>([
+      ...this.imageQueue.map((q) => q.job.id),
+      ...this.shotStillQueue.map((q) => q.job.id),
+    ]);
+    if (this.activeImage) live.add(this.activeImage.id);
+    const finished = [...this.imageJobs.values()]
+      .filter((j) => j.status !== "queued" && j.status !== "running" && !live.has(j.id))
+      .sort((a, b) => a.createdAt - b.createdAt);
+    for (const j of finished) {
+      if (this.imageJobs.size <= MAX_JOBS) break;
+      this.imageJobs.delete(j.id);
+    }
+  }
+
   private async pumpImage() {
-    if (this.activeImage || this.imageQueue.length === 0) return;
-    // Images and video share one GPU: wait for any running render to finish first.
+    if (this.activeImage) return;
+    if (this.imageQueue.length === 0 && this.shotStillQueue.length === 0) return;
+    // Images, stills and video share one GPU: wait for any running render first.
     if (this.activeRender || this.activeExport) {
       setTimeout(() => void this.pumpImage(), 1500);
       return;
     }
-    const item = this.imageQueue.shift()!;
-    const { job } = item;
+    // Dispatch by asking each worker to claim `job`, rather than shifting here,
+    // so the item stays on its own queue until a worker actually takes it.
+    const next = this.imageQueue[0] ?? this.shotStillQueue[0];
+    if (!next) return;
+    const job = next.job;
     this.activeImage = job;
     try {
-      await this.processImage(item);
+      await this.processNextImageItem(job);
     } catch (e) {
       job.status = "error";
       job.error = e instanceof Error ? e.message : String(e);
@@ -365,6 +482,83 @@ export class Director {
     this.emit("imageJob", job.projectId, job.id, job);
     this.emit("imageJobDone", job.projectId, job.id, job);
     void this.pumpImage();
+  }
+
+  /**
+   * Run the queued item matching `job` with the right worker, removing it from
+   * its queue first. `imageJobKinds` is the authority on which worker a job
+   * belongs to, so a shot whose still stage was switched off mid-queue still
+   * reports the right failure instead of silently running as a board job.
+   */
+  private async processNextImageItem(job: ImageJob) {
+    if (this.imageJobKinds.get(job.id) === "shotStill") {
+      this.imageJobKinds.delete(job.id);
+      const found = this.shotStillQueue.find((q) => q.job.id === job.id);
+      this.shotStillQueue = this.shotStillQueue.filter((q) => q.job.id !== job.id);
+      await this.processShotStillJob(found ?? { projectId: job.projectId, shotId: job.boardId, count: 1, job });
+      return;
+    }
+    this.imageJobKinds.delete(job.id);
+    const found = this.imageQueue.find((q) => q.job.id === job.id);
+    this.imageQueue = this.imageQueue.filter((q) => q.job.id !== job.id);
+    await this.processImage(found ?? { projectId: job.projectId, boardId: job.boardId, count: 1, job });
+  }
+
+  /**
+   * Render a shot's still stage as a tracked, cancellable, serialized job.
+   * Every write goes through the fresh-state store helpers so a concurrent edit
+   * by the director is never reverted.
+   */
+  private async processShotStillJob(item: PendingShotStill) {
+    const { projectId, shotId, count, job } = item;
+    job.status = "running";
+    job.progress = { pct: 0, label: "Rendering still" };
+    this.emit("imageJob", projectId, job.id, job);
+
+    const project0 = getProject(projectId);
+    const shot0 = project0?.shots.find((s) => s.id === shotId);
+    if (!project0 || !shot0?.still || shot0.still.mode === "none") {
+      throw new Error("This shot has no still stage.");
+    }
+    const settings = this.getSettings();
+    const comfyInputDir = await this.resolveInputDir(settings);
+    if (!comfyInputDir) throw new Error("Could not locate the ComfyUI input folder. Check Settings.");
+
+    const n = Math.max(1, Math.min(4, Math.round(count)));
+    let made = 0;
+    for (let i = 0; i < n; i++) {
+      if (job.status === CANCELLED) break;
+      // Re-read every variant: the still config may have been edited meanwhile.
+      const project = getProject(projectId);
+      const shot = project?.shots.find((s) => s.id === shotId);
+      if (!project || !shot?.still || shot.still.mode === "none") break;
+      try {
+        const chosen = await this.renderShotStill(project, shot, (pct, label) => {
+          job.progress = { pct: Math.round(((i + pct / 100) / n) * 100), label };
+          job.updatedAt = Date.now();
+          this.imageJobs.set(job.id, job);
+          this.emit("imageJob", projectId, job.id, job);
+        });
+        made++;
+        this.emit("shotStillDone", projectId, job.id, { shotId, take: chosen });
+      } catch (e) {
+        // A failed variant must not abort the rest, and must not revert edits.
+        appendStillTake(projectId, shotId, {
+          id: crypto.randomUUID().slice(0, 8),
+          seed: 0,
+          createdAt: Date.now(),
+          status: "error",
+          error: e instanceof Error ? e.message : String(e),
+          accepted: false,
+        });
+      }
+    }
+    if (made === 0 && job.status !== CANCELLED) {
+      throw new Error("The still stage produced no image.");
+    }
+    job.status = job.status === CANCELLED ? CANCELLED : "done";
+    job.progress = { pct: 100, label: "Done" };
+    this.emit("project", projectId);
   }
 
   private async processImage(item: PendingImage) {
@@ -455,10 +649,20 @@ export class Director {
   }
 
   async cancelImageJob(jobId: string): Promise<boolean> {
+    // A queued shot still cancels the same way a board job does.
+    const queuedShotStill = this.shotStillQueue.find((q) => q.job.id === jobId);
+    if (queuedShotStill) {
+      queuedShotStill.job.status = CANCELLED;
+      this.shotStillQueue = this.shotStillQueue.filter((q) => q.job.id !== jobId);
+      this.imageJobKinds.delete(jobId);
+      this.emit("imageJob", queuedShotStill.job.projectId, jobId, queuedShotStill.job);
+      return true;
+    }
     const queued = this.imageQueue.find((q) => q.job.id === jobId);
     if (queued) {
       queued.job.status = CANCELLED;
       this.imageQueue = this.imageQueue.filter((q) => q.job.id !== jobId);
+      this.imageJobKinds.delete(jobId);
       this.emit("imageJob", queued.job.projectId, jobId, queued.job);
       return true;
     }
@@ -570,14 +774,15 @@ export class Director {
           warnings: out.warnings,
           accepted: false,
         };
-        still.takes.push(take);
         rendered.push(take);
-        saveProject(project);
+        // Append against fresh on-disk state (see appendShotTake): writing the
+        // job-long `project` snapshot back would revert the user's edits.
+        appendStillTake(project.id, shot.id, take);
         this.emit("project", project.id);
       } catch (e) {
         // A failed variant must not abort the whole still stage: keep the ones
         // that worked and report the failure alongside them.
-        still.takes.push({
+        appendStillTake(project.id, shot.id, {
           id: crypto.randomUUID().slice(0, 8),
           seed,
           createdAt: Date.now(),
@@ -585,7 +790,6 @@ export class Director {
           error: e instanceof Error ? e.message : String(e),
           accepted: false,
         });
-        saveProject(project);
       }
     }
 
@@ -610,14 +814,17 @@ export class Director {
     const abs = absolute(take.imageFile);
     if (!fs.existsSync(abs)) throw new Error("The still's image file is missing on disk.");
     const asset = addAsset({ name: `${shot.name || "Shot"} still ${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.png`, absSrc: abs });
-    shot.still!.selectedTakeId = take.id;
-    shot.firstFrameId = asset.id;
-    // A still we generated is always the real first frame — it must not be
-    // overwritten by the seamless-chaining logic during the video render.
-    shot.continueFromPrev = false;
-    // The still now drives the shot, so an image-mode render is required.
-    if (shot.kind === "t2v") shot.kind = "i2v";
-    saveProject(project);
+    // Four fields change together, so write them against fresh on-disk state in
+    // one pass rather than persisting a job-long snapshot.
+    mutateShotOnDisk(project.id, shot.id, (s) => {
+      if (s.still) s.still.selectedTakeId = take.id;
+      s.firstFrameId = asset.id;
+      // A still we generated is always the real first frame — it must not be
+      // overwritten by the seamless-chaining logic during the video render.
+      s.continueFromPrev = false;
+      // The still now drives the shot, so an image-mode render is required.
+      if (s.kind === "t2v") s.kind = "i2v";
+    });
     this.emit("project", project.id);
     return asset;
   }
