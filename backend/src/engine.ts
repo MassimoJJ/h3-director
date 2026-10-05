@@ -9,6 +9,7 @@ import { absData, stageFiles, uploadImage } from "./media";
 import { conformFrame, extractFirstFrame } from "./ffmpeg";
 import { ensureOutputDirs, getAsset } from "./store";
 import type { AppSettings, EngineProbe, Project, Shot } from "./types";
+import { clampShotSeconds } from "./types";
 
 export interface EngineModels {
   fl2va: string;
@@ -168,7 +169,7 @@ export function buildGraph(
     aspect_ratio: shot.aspect,
     width: shot.resolution === "custom" ? shot.width : 1344,
     height: shot.resolution === "custom" ? shot.height : 768,
-    seconds: Math.min(15, Math.max(0.5, shot.seconds)),
+    seconds: clampShotSeconds(shot.seconds),
     advanced: true,
     fps: Math.min(120, Math.max(1, shot.fps)),
     keyframe_role: opts.keyframeRole,
@@ -393,6 +394,14 @@ export async function renderShot(opts: RenderInputs): Promise<ShotRenderResult> 
 
   const clientId = `h3d-${shot.id}-${Date.now()}`;
   const res = await comfy.queuePrompt(plan.apiPrompt, clientId);
+
+  // The exact graph that was submitted. A failed render was previously
+  // undiagnosable: the take recorded no promptId on the error path and the graph
+  // was thrown away, so /history/<id> could never be consulted and the only way
+  // to reproduce a failure was to reconstruct it by hand. Persist it next to the
+  // shot's media, on BOTH the success and failure paths.
+  const graphAbs = dumpGraph(project.id, shot.id, res.prompt_id, plan.apiPrompt, shot, seed);
+
   let hist: Record<string, unknown> | undefined;
   const started = Date.now();
   const limitMs = opts.timeoutMs && opts.timeoutMs > 0 ? opts.timeoutMs : 25 * 60_000;
@@ -400,11 +409,25 @@ export async function renderShot(opts: RenderInputs): Promise<ShotRenderResult> 
     hist = await comfy.history(res.prompt_id);
     const st = (hist as { status?: { status_str?: string } } | undefined)?.status?.status_str;
     if (hist && st) break;
-    if (Date.now() - started > limitMs) throw new Error(`Render timed out after ${Math.round(limitMs / 60_000)} minutes.`);
+    if (Date.now() - started > limitMs) {
+      // A timeout must not leave the prompt running: the next shot would queue
+      // behind a zombie render for the full timeout again. Interrupt first.
+      await comfy.interrupt().catch(() => {});
+      throw new Error(
+        `Render timed out after ${Math.round(limitMs / 60_000)} minutes. ` +
+          `The engine prompt was interrupted; the graph is saved at ${graphAbs}.`,
+      );
+    }
     await sleep(4000);
   }
   const status = (hist as { status?: { status_str?: string } }).status;
-  if (status?.status_str !== "success") throw new Error(extractHistoryError(hist) || "ComfyUI render failed (see ComfyUI console).");
+  if (status?.status_str !== "success") {
+    // Keep ComfyUI's own error output next to the graph: "render failed" with no
+    // node name is not something you can act on.
+    const detail = extractHistoryError(hist) || "ComfyUI render failed (see ComfyUI console).";
+    saveGraphError(graphAbs, hist);
+    throw new Error(`${detail}\n(prompt ${res.prompt_id}; graph saved to ${graphAbs})`);
+  }
 
   const files = collectOutputFiles((hist as { outputs?: unknown }).outputs);
   const video = files.find((f) => f.isVideo);
@@ -449,6 +472,69 @@ export async function renderShot(opts: RenderInputs): Promise<ShotRenderResult> 
     compiledPrompt: plan.compiledPrompt,
     warnings: plan.warnings,
   };
+}
+
+/**
+ * Write the submitted graph next to the shot's media, so a render — especially
+ * a failed one — can be reproduced or inspected later. Without this, a failure
+ * was undiagnosable after the fact: the take had no promptId and the graph was
+ * gone, leaving only an error string.
+ */
+function dumpGraph(
+  projectId: string,
+  shotId: string,
+  promptId: string,
+  apiPrompt: Record<string, unknown>,
+  shot: Shot,
+  seed: number,
+): string {
+  const dir = ensureOutputDirs(projectId, shotId);
+  const file = path.join(dir, `graph_${promptId}.json`);
+  try {
+    fs.writeFileSync(
+      file,
+      JSON.stringify(
+        {
+          promptId,
+          shotId,
+          shotName: shot.name,
+          kind: shot.kind,
+          seed,
+          seconds: shot.seconds,
+          resolution: shot.resolution,
+          aspect: shot.aspect,
+          width: shot.width,
+          height: shot.height,
+          steps: shot.steps,
+          sampler: shot.sampler,
+          scheduler: shot.scheduler,
+          prompt: shot.prompt,
+          writtenAt: new Date().toISOString(),
+          apiPrompt,
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+  } catch (e) {
+    // Never fail a render because the diagnostic dump could not be written.
+    console.error(`[engine] could not save the graph for shot ${shotId}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  return file;
+}
+
+/** Append ComfyUI's history entry to the saved graph file. */
+function saveGraphError(graphAbs: string, hist: Record<string, unknown> | undefined) {
+  try {
+    fs.appendFileSync(
+      graphAbs,
+      `\n\n/* ---- ComfyUI history at failure ---- */\n${JSON.stringify(hist, null, 2)}\n`,
+      "utf8",
+    );
+  } catch (e) {
+    console.error(`[engine] could not append the failure detail: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 function extractHistoryError(hist: Record<string, unknown> | undefined): string {

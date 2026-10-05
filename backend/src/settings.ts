@@ -2,11 +2,19 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AppSettings } from "./types";
+import { MAX_SHOT_SECONDS, MIN_SHOT_SECONDS } from "./types";
 import { PROVIDERS, providerDef } from "./providers";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const APP_ROOT = path.resolve(__dirname, "..", "..");
-export const DATA_DIR = path.join(APP_ROOT, "data");
+/**
+ * Runtime state lives in `data/` beside the app. H3_DATA_DIR overrides it so the
+ * store regression check can exercise the real save/read code against a temp
+ * directory instead of the director's live projects.
+ */
+export const DATA_DIR = process.env.H3_DATA_DIR
+  ? path.resolve(process.env.H3_DATA_DIR)
+  : path.join(APP_ROOT, "data");
 export const LIBRARY_DIR = path.join(DATA_DIR, "library");
 export const OUTPUTS_DIR = path.join(DATA_DIR, "outputs");
 export const EXPORTS_DIR = path.join(DATA_DIR, "exports");
@@ -29,8 +37,32 @@ export const DEFAULT_SETTINGS: AppSettings = {
 };
 
 export function ensureDirs() {
-  for (const d of [DATA_DIR, LIBRARY_DIR, OUTPUTS_DIR, EXPORTS_DIR, CACHE_DIR, IMAGES_DIR]) {
+  for (const d of [DATA_DIR, LIBRARY_DIR, OUTPUTS_DIR, EXPORTS_DIR, CACHE_DIR, IMAGES_DIR, LOGS_DIR]) {
     fs.mkdirSync(d, { recursive: true });
+  }
+}
+
+export const LOGS_DIR = path.join(DATA_DIR, "logs");
+
+/**
+ * Append one line to a job's log file.
+ *
+ * Everything the pipeline reported about a render used to exist only as
+ * WebSocket messages to whichever browser happened to be open, so a failure was
+ * undiagnosable once the tab closed or the process restarted. This is the
+ * durable record: one JSONL line per event, per job, timestamped.
+ */
+export function appendJobLog(jobId: string, level: string, message: string, extra?: Record<string, unknown>) {
+  try {
+    const safe = String(jobId).replace(/[^a-zA-Z0-9_-]/g, "") || "job";
+    fs.appendFileSync(
+      path.join(LOGS_DIR, `${safe}.jsonl`),
+      JSON.stringify({ at: new Date().toISOString(), level, message, ...(extra ?? {}) }) + "\n",
+      "utf8",
+    );
+  } catch (e) {
+    // Logging must never be able to fail a render.
+    console.error(`[logs] could not write the job log: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -121,6 +153,9 @@ export function publicSettings(s: AppSettings) {
     renderTimeoutMin: s.renderTimeoutMin,
     imageTimeoutMin: s.imageTimeoutMin,
     director: s.director,
+    // The engine's real limits, sent to the UI so the timeline's drag handle and
+    // tooltips can never disagree with what the renderer will actually accept.
+    limits: { maxShotSeconds: MAX_SHOT_SECONDS, minShotSeconds: MIN_SHOT_SECONDS },
     keys,
   };
 }

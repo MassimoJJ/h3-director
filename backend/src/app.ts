@@ -34,6 +34,7 @@ import {
   getAsset,
   getProject,
   kindForFile,
+  lastSuccessfulTake,
   listAssets,
   listProjects,
   newShotId,
@@ -43,8 +44,8 @@ import {
   saveProject,
   updateAsset,
 } from "./store";
-import type { AppSettings, EngineProbe, ImageBoard, Project, Shot, ShotStill, StillMode } from "./types";
-import { newStill, normalizeStill } from "./types";
+import type { AppSettings, EngineProbe, ImageBoard, Project, Shot, ShotStill, StillMode, Take } from "./types";
+import { newStill, normalizeStill, clampShotSeconds, setAcceptedTakes } from "./types";
 
 function asyncWrap(fn: (req: Request, res: Response) => Promise<void>) {
   return (req: Request, res: Response, next: express.NextFunction) => {
@@ -419,12 +420,18 @@ export function buildApp(deps: { director: Director; getComfy: () => ComfyClient
     asyncWrap(async (req, res) => {
       const p = getProject(req.params.id);
       if (!p) { res.status(404).json({ error: "Project not found" }); return; }
-      const { kind, name } = body<{ kind?: Shot["kind"]; name?: string }>(req);
+      // Accept an initial prompt/duration as well as kind and name: seeding a
+      // script, importing a shot list, or any tool that builds a cut needs to
+      // create a real shot in one call rather than create-then-patch.
+      const patch = body<{ kind?: Shot["kind"]; name?: string; prompt?: string; seconds?: number }>(req);
+      const kind = patch.kind ?? "t2v";
       const d = p.defaults;
       const shot: Shot = {
-        id: newShotId(), name: name ?? `Shot ${p.shots.length + 1}`, kind: kind ?? "t2v", prompt: "",
+        id: newShotId(), name: patch.name ?? `Shot ${p.shots.length + 1}`, kind, prompt: patch.prompt ?? "",
         imageIds: [], videoIds: [], audioIds: [], firstFrameId: null, lastFrameId: null,
-        continueFromPrev: false, seconds: d.seconds, fps: d.fps, resolution: d.resolution,
+        continueFromPrev: false,
+        seconds: patch.seconds != null ? clampShotSeconds(Number(patch.seconds)) : d.seconds,
+        fps: d.fps, resolution: d.resolution,
         aspect: d.aspect, width: 1344, height: 768, steps: d.steps, sampler: d.sampler,
         scheduler: d.scheduler, seedMode: "random", seed: Math.floor(Math.random() * 2 ** 32),
         refImageSize: d.refImageSize, loraStrength: d.loraStrength,
@@ -455,10 +462,22 @@ export function buildApp(deps: { director: Director; getComfy: () => ComfyClient
       if (!p || idx == null || idx < 0) { res.status(404).json({ error: "Shot not found" }); return; }
       const s = p.shots[idx];
       const [pa, pb] = splitPromptText(s.prompt);
+      // splitPromptText falls back to the whole text for a half it could not
+      // find a boundary in. If BOTH halves came back as the full prompt (or
+      // either half is empty), the split would duplicate the prompt rather than
+      // divide it, so refuse instead of writing two identical shots.
+      if (!pa.trim() || !pb.trim() || (pa === s.prompt.trim() && pb === s.prompt.trim())) {
+        res.status(400).json({
+          error: "This prompt has no usable split point — add a second section or a sentence break, then split again.",
+        });
+        return;
+      }
       const total = Math.max(1, s.seconds);
       const ratio = pa.length + pb.length > 0 ? pa.length / (pa.length + pb.length) : 0.5;
-      const aDur = Math.min(12, Math.max(1, Math.round(total * ratio * 2) / 2));
-      const bDur = Math.max(1, total - aDur);
+      // Each half must fit H3's single-generation ceiling, so clamp each part
+      // rather than hardcoding a second, smaller limit here.
+      const aDur = clampShotSeconds(Math.round(total * ratio * 2) / 2);
+      const bDur = clampShotSeconds(total - aDur);
       const base = { ...s }; // keep kind, media refs, settings, seed of the original
       const mk = (patch: Partial<Shot>): Shot => ({
         ...structuredClone(base),
@@ -496,6 +515,68 @@ export function buildApp(deps: { director: Director; getComfy: () => ComfyClient
       saveProject(p);
       res.json({ project: p });
     }),
+  );
+
+  /**
+   * Accept or un-accept one video take of a shot.
+   *
+   * Shot takes had no accept endpoint at all (only image boards did), and the
+   * render queue always writes `accepted: false`. So the export/viewer fallback
+   * was the only thing deciding which take you got — and it used to be the
+   * OLDEST successful take. This route makes the choice explicit, and the
+   * fallback now defaults to the newest.
+   */
+  app.post(
+    "/api/projects/:id/shots/:shotId/takes/:takeId/accept",
+    (req, res) => {
+      const p = getProject(req.params.id);
+      if (!p) { res.status(404).json({ error: "Project not found" }); return; }
+      const shot = p.shots.find((s) => s.id === req.params.shotId);
+      if (!shot) { res.status(404).json({ error: "Shot not found" }); return; }
+      const take = shot.takes.find((t) => t.id === req.params.takeId);
+      if (!take) { res.status(404).json({ error: "Take not found" }); return; }
+      const accepted = body<{ accepted?: boolean }>(req).accepted !== false;
+      if (accepted && take.status !== "ok") {
+        res.status(400).json({ error: "A failed take has no video to accept." });
+        return;
+      }
+      const takes = setAcceptedTakes(shot.takes, take.id, accepted);
+      if (!takes) { res.status(400).json({ error: "Could not set that take." }); return; }
+      shot.takes = takes;
+      saveProject(p);
+      res.json({ project: p, shot });
+    },
+  );
+
+  /**
+   * Delete one take and its media. Without this, a bad render was permanent:
+   * its mp4/png stayed on disk forever and the take stayed in the list to be
+   * clicked through.
+   */
+  app.delete(
+    "/api/projects/:id/shots/:shotId/takes/:takeId",
+    (req, res) => {
+      const p = getProject(req.params.id);
+      if (!p) { res.status(404).json({ error: "Project not found" }); return; }
+      const shot = p.shots.find((s) => s.id === req.params.shotId);
+      if (!shot) { res.status(404).json({ error: "Shot not found" }); return; }
+      const idx = shot.takes.findIndex((t) => t.id === req.params.takeId);
+      if (idx < 0) { res.status(404).json({ error: "Take not found" }); return; }
+      const [gone] = shot.takes.splice(idx, 1);
+      // Un-accepting the surviving takes keeps "exactly one accepted" honest.
+      if (gone.accepted && shot.takes.length) {
+        const newest = lastSuccessfulTake(shot);
+        if (newest) shot.takes = shot.takes.map((t) => ({ ...t, accepted: t.id === newest.id }));
+      }
+      saveProject(p);
+      const removed: string[] = [];
+      for (const f of [gone.videoFile, gone.thumbFile]) {
+        if (!f) continue;
+        const abs = path.isAbsolute(f) ? f : path.join(DATA_DIR, f);
+        try { fs.rmSync(abs, { force: true }); removed.push(f); } catch { /* already gone */ }
+      }
+      res.json({ project: p, shot, removed });
+    },
   );
 
   // ---------- assets (library) ----------
@@ -711,8 +792,13 @@ export function buildApp(deps: { director: Director; getComfy: () => ComfyClient
         res.status(400).json({ error: "This shot has no still stage — pick text-to-image or image-to-image first." });
         return;
       }
-      await deps.director.renderShotStill(p, shot);
-      res.json(shot);
+      // Queued, not awaited: this used to block the HTTP request for the whole
+      // multi-minute render AND bypass the serial GPU pump, so two clicks could
+      // put two jobs on the card at once. The response is now the job, and the UI
+      // tracks it through the same image-job channel the boards already use.
+      const { count } = body<{ count?: number }>(req);
+      const n = Math.max(1, Math.min(4, Math.round(count ?? 1)));
+      res.json(deps.director.enqueueShotStill(req.params.id, req.params.shotId, n));
     }),
   );
 
@@ -993,7 +1079,9 @@ function splitPromptText(prompt: string): [string, string] {
   }
   const pa = t.slice(0, idx).trim();
   const pb = t.slice(idx).trim();
-  return [pa || t, pb || t]; // never return an empty half unless the prompt itself was empty
+  // Never return an empty half — a blank prompt means the shot renders nothing
+  // useful, which is worse than an imperfect boundary.
+  return [pa || t, pb || t];
 }
 
 function sanitizeShots(shots: Shot[]): Shot[] {
