@@ -3,6 +3,42 @@
 export type MediaKind = "image" | "audio" | "video";
 export type ShotKind = "t2v" | "i2v" | "fl2v" | "r2v";
 
+/**
+ * H3's single-generation ceiling, in seconds. H3 cannot produce a longer clip
+ * in one pass, so a long film is several shots.
+ *
+ * This lives in the shared data model because three places independently
+ * enforced a duration limit and had drifted apart: the engine clamped to 15, the
+ * timeline's drag handle clamped to 12 (making 12-15s unreachable by dragging,
+ * while its own tooltip claimed a limit the engine did not have), and the split
+ * route hardcoded 12 again. One constant, imported everywhere.
+ */
+export const MAX_SHOT_SECONDS = 15;
+
+/** Shortest shot the app will store. Below ~0.5s there is nothing to animate. */
+export const MIN_SHOT_SECONDS = 0.5;
+
+/** Clamp any duration into the range H3 can actually render. */
+export function clampShotSeconds(sec: number): number {
+  if (!Number.isFinite(sec)) return MIN_SHOT_SECONDS;
+  return Math.min(MAX_SHOT_SECONDS, Math.max(MIN_SHOT_SECONDS, sec));
+}
+
+/**
+ * Make one take of a shot the accepted one, clearing the flag on the rest.
+ *
+ * Kept beside the clamp helpers because it is pure data logic that both the API
+ * and the store need, and because "exactly one accepted take" is an invariant
+ * worth stating in one place. Refuses to accept a failed take — it has no file
+ * to play or export, so accepting it would only break playback later.
+ */
+export function setAcceptedTakes(takes: Take[], takeId: string, accepted: boolean): Take[] | undefined {
+  const target = takes.find((t) => t.id === takeId);
+  if (!target) return undefined;
+  if (accepted && target.status !== "ok") return undefined;
+  return takes.map((t) => ({ ...t, accepted: accepted && t.id === takeId }));
+}
+
 /** Qwen Image 2.1 still-image stage: text-to-image or image-edit ("i2i"). */
 export type ImageMode = "t2i" | "edit";
 
