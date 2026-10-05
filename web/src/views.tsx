@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, assetUrl, exportUrl, imageUrl, outputUrl } from "./api";
+import { api, assetUrl, exportUrl, imageUrl, onBusEvent, outputUrl } from "./api";
 import { useUi } from "./ui";
 import { MediaThumb } from "./MediaViewer";
 import { DropZone, useUploadFiles } from "./DropZone";
@@ -53,6 +53,8 @@ const KIND_LABEL: Record<ShotKind, string> = {
 export function ScriptView() {
   const ui = useUi();
   const { project, activeJob } = ui;
+  /** Record an undo point before a structural change. */
+  const pushUndo = ui.pushUndo;
   const [selId, setSelId] = useState<string | null>(null);
   // Structure-all dialog, scoped to a timeline window [start, end).
   const [saWin, setSaWin] = useState<{ start: number; end: number } | null>(null);
@@ -61,6 +63,18 @@ export function ScriptView() {
   // Single-shot structuring launched from a shot card's free-form badge.
   const [structingId, setStructingId] = useState<string | null>(null);
   const [playCutOpen, setPlayCutOpen] = useState(false);
+  // Playhead position in the assembled cut, drawn on the timeline ruler. Null
+  // when the cut player is closed, so the line never lingers after review.
+  const [playhead, setPlayhead] = useState<number | null>(null);
+  // Multi-selection for batch actions. Kept as a Set of shot ids rather than an
+  // index range so it survives reorders — a range-based selection silently
+  // changes meaning the moment a shot moves.
+  const [multiSel, setMultiSel] = useState<Set<string>>(new Set());
+  // Anchor for shift-click range selection: the last shot clicked normally.
+  const [selAnchor, setSelAnchor] = useState<number | null>(null);
+  // Set by the timeline right after a drag-reorder so the resulting click does
+  // not also re-select whatever landed under the pointer.
+  const suppressClickRef = useRef(false);
   // Timeline workspace sizing — how much of the window the timeline owns (percent) and
   // how many pixels a second of shot duration is worth. Both persist, so the timeline
   // stays the size the director last worked at.
@@ -172,6 +186,117 @@ export function ScriptView() {
     window.addEventListener("pointerup", up);
   };
 
+  /** Bulk operations act on the multi-selection, or on the single selected shot. */
+  const actionTargets = (): Shot[] => {
+    if (multiSel.size > 0) return project.shots.filter((s) => multiSel.has(s.id));
+    return sel ? [sel] : [];
+  };
+
+  const clearMulti = () => {
+    setMultiSel(new Set());
+    setSelAnchor(null);
+  };
+
+  /**
+   * Click / shift-click on a tile. Plain click selects one; shift-click extends
+   * from the anchor, which is how every NLE and file browser behaves.
+   */
+  const selectShot = (shot: Shot, index: number, shift: boolean) => {
+    if (!shift) {
+      setSelId(shot.id);
+      setSelAnchor(index);
+      setMultiSel(new Set());
+      return;
+    }
+    setSelId(shot.id);
+    const from = selAnchor ?? index;
+    const lo = Math.min(from, index);
+    const hi = Math.max(from, index);
+    const next = new Set(multiSel);
+    for (const s of project.shots.slice(lo, hi + 1)) next.add(s.id);
+    setMultiSel(next);
+  };
+
+  const batchDelete = () => {
+    const targets = actionTargets();
+    if (!targets.length) return;
+    const names = targets.slice(0, 4).map((s) => s.name || "Untitled").join(", ");
+    if (!confirm(`Delete ${targets.length} shot${targets.length === 1 ? "" : "s"} (${names}${targets.length > 4 ? ", …" : ""})?\n\nTheir takes and media are deleted too.`)) return;
+    pushUndo(`delete ${targets.length} shot${targets.length === 1 ? "" : "s"}`);
+    // Fire them together; each delete is independent, and serialising would just
+    // make a 20-shot delete take 20 round-trips.
+    void Promise.allSettled(targets.map((s) => api.deleteShot(project.id, s.id)))
+      .then(() => ui.refreshAll())
+      .then(() => ui.toast(`Deleted ${targets.length} shot${targets.length === 1 ? "" : "s"} — Ctrl+Z restores them`));
+  };
+
+  const batchChain = () => {
+    const targets = actionTargets();
+    if (targets.length < 2) { ui.toast("Select at least two shots to chain.", "err"); return; }
+    pushUndo("chain shots");
+    // Chain means "continue from the previous shot's last frame", so every shot
+    // but the first in the selection gets the flag.
+    const ids = targets.map((s) => s.id);
+    const next: Project = {
+      ...project,
+      shots: project.shots.map((s, i) => {
+        if (!multiSel.size) return s;
+        const at = ids.indexOf(s.id);
+        if (at <= 0) return s;
+        return { ...s, continueFromPrev: true };
+      }),
+    };
+    ui.saveProject(next);
+    ui.toast(`Chained ${targets.length} shots — they will continue from one another`);
+  };
+
+  const batchUnchain = () => {
+    if (!multiSel.size) return;
+    pushUndo("unchain shots");
+    const next: Project = {
+      ...project,
+      shots: project.shots.map((s) => (multiSel.has(s.id) ? { ...s, continueFromPrev: false } : s)),
+    };
+    ui.saveProject(next);
+    ui.toast("Removed the continue-from-previous flag from the selection");
+  };
+
+  /**
+   * Insert a shot at a position. `index` is the slot it should occupy, so 0 puts
+   * it first and shots.length appends. `+ Shot` used to always append, which
+   * meant inserting between shot 7 and 8 required drag-reorder gymnastics.
+   */
+  const addShotAt = async (index: number) => {
+    const at = Math.max(0, Math.min(index, project.shots.length));
+    try {
+      const r = await api.addShot(project.id, { name: `Shot ${at + 1}` });
+      // The server appends; move it into place locally and persist the order.
+      const created = r.shot;
+      if (created && at < project.shots.length) {
+        const without = project.shots.filter((s) => s.id !== created.id);
+        without.splice(at, 0, created);
+        ui.saveProject({ ...project, shots: without });
+        await ui.refreshAll();
+        setSelId(created.id);
+        return;
+      }
+      await ui.refreshAll();
+      if (created) setSelId(created.id);
+    } catch (e) {
+      ui.toast(`Could not add a shot: ${(e as Error).message}`, "err");
+    }
+  };
+
+  /** Selection entry point used by the timeline tiles (supports shift-click). */
+  const selectShotById = (id: string, ev?: React.MouseEvent) => {
+    const index = project.shots.findIndex((x) => x.id === id);
+    if (index < 0) return;
+    const shot = project.shots[index];
+    // A drop-suppressed click (just finished a drag) must not change selection.
+    if (suppressClickRef.current) { suppressClickRef.current = false; return; }
+    selectShot(shot, index, ev?.shiftKey ?? false);
+  };
+
   const stepZoom = (dir: 1 | -1) => {
     setZoom((z) => {
       const next = clamp(z + dir, 0, TIMELINE_ZOOMS.length - 1);
@@ -189,7 +314,7 @@ export function ScriptView() {
         project={project}
         assets={ui.assets}
         selId={sel?.id ?? null}
-        onSelect={setSelId}
+        onSelect={selectShotById}
         onSplit={(id) => void splitShot(id)}
         onPlayCut={() => setPlayCutOpen(true)}
         activeJob={activeJob}
@@ -197,29 +322,42 @@ export function ScriptView() {
         structuredCount={structuredCount}
         onStructureAll={() => setSaWin({ start: 0, end: project.shots.length })}
         onRename={(name) => ui.saveProject({ ...project, name })}
-        onAddShot={() => api.addShot(project.id).then(() => ui.refreshAll()).catch(() => {})}
+        onAddShot={() => void addShotAt(project.shots.length)}
         onRender={(ids, chain) => ui.renderShots(ids, chain)}
         structingId={structingId}
         onStructShot={(s) => { setSelId(s.id); void quickStructure(s); }}
         onStructMenu={showRangeMenu}
         onReorder={(from, to) => {
+          // Snapshot BEFORE the splice so Ctrl+Z can put the order back exactly.
+          pushUndo("reorder shots", project.shots[from]?.id);
           const shots = [...project.shots];
           const [it] = shots.splice(from, 1);
           shots.splice(to, 0, it);
           ui.saveProject({ ...project, shots });
         }}
-        onResize={(shotId, seconds) => ui.mutateShot(shotId, { seconds })}
+        onResize={(shotId, seconds) => {
+          pushUndo("resize shot", shotId);
+          ui.mutateShot(shotId, { seconds });
+        }}
         onDuplicate={(shotId) => api.duplicateShot(project.id, shotId).then(() => ui.refreshAll())}
         onDelete={(shotId) => {
           const s = project.shots.find((x) => x.id === shotId);
-          if (confirm(`Delete shot “${s?.name || "Untitled"}”?`)) api.deleteShot(project.id, shotId).then(() => ui.refreshAll());
+          // Undo makes this safe enough that a plain confirm is no longer the
+          // only thing standing between a mis-click and lost work — but deleting
+          // a shot also deletes its media, so still confirm.
+          if (!confirm(`Delete shot “${s?.name || "Untitled"}”?\n\nIts takes and media are deleted too. You can undo the shot itself with Ctrl+Z, but the media is gone.`)) return;
+          pushUndo("delete shot", shotId);
+          api.deleteShot(project.id, shotId).then(() => ui.refreshAll());
         }}
         onAcceptTake={(shotId, takeId, accepted) => {
           const s = project.shots.find((x) => x.id === shotId);
-          if (s) setAccept(project, s, takeId, accepted, ui);
+          if (!s) return;
+          pushUndo(accepted ? "accept take" : "un-accept take", shotId);
+          setAccept(project, s, takeId, accepted, ui);
         }}
         onSetStillMode={async (shotId, m) => {
           try {
+            pushUndo("change still mode", shotId);
             const updated = await api.setShotStill(project.id, shotId, m);
             ui.mutateShot(shotId, { still: updated.still, kind: updated.kind, firstFrameId: updated.firstFrameId });
             ui.toast(`Shot mode set to ${m === "t2i" ? "Text → Image (T2I)" : m === "i2i" ? "Image → Image (I2I)" : "Direct Video"}`);
@@ -227,7 +365,26 @@ export function ScriptView() {
             ui.toast(`Could not change still stage: ${(e as Error).message}`, "err");
           }
         }}
-        />
+        onAddShotAt={(index) => void addShotAt(index)}
+        onDragSettled={() => { suppressClickRef.current = true; }}
+        batch={{
+          count: multiSel.size,
+          anySelected: multiSel.size > 0,
+          chain: batchChain,
+          unchain: batchUnchain,
+          render: () => {
+            ui.renderShots(project.shots.filter((s) => multiSel.has(s.id)).map((s) => s.id));
+            clearMulti();
+          },
+          structure: () => openRange(project.shots.findIndex((s) => multiSel.has(s.id)), project.shots.length),
+          remove: batchDelete,
+          clear: clearMulti,
+        }}
+        canUndo={ui.canUndo}
+        onUndo={ui.undo}
+        multiSel={multiSel}
+        playhead={playhead}
+      />
       </div>
       <div className="tl-vsplit" onPointerDown={startSplit}
         title="Drag to give the timeline more or less room (double-click resets it)"
@@ -275,7 +432,13 @@ export function ScriptView() {
           onDiscard={() => setQuickReview(null)}
         />
       )}
-      {playCutOpen && <PlayCutModal onClose={() => setPlayCutOpen(false)} onScrubToShot={setSelId} />}
+      {playCutOpen && (
+        <PlayCutModal
+          onClose={() => { setPlayhead(null); setPlayCutOpen(false); }}
+          onScrubToShot={setSelId}
+          onPlayhead={setPlayhead}
+        />
+      )}
     </div>
   );
 }
@@ -288,7 +451,12 @@ export function ScriptView() {
  *  pipeline, then plays the result with a custom scrubber: vertical markers mark
  *  each shot boundary, and the segment under the playhead is selected in the
  *  timeline as you scrub. */
-function PlayCutModal({ onClose, onScrubToShot }: { onClose: () => void; onScrubToShot?: (shotId: string) => void }) {
+function PlayCutModal({ onClose, onScrubToShot, onPlayhead }: {
+  onClose: () => void;
+  onScrubToShot?: (shotId: string) => void;
+  /** Report the current time so the timeline can draw a playhead. */
+  onPlayhead?: (seconds: number | null) => void;
+}) {
   const ui = useUi();
   const project = ui.project!;
   const [phase, setPhase] = useState<"assembling" | "ready" | "error">("assembling");
@@ -431,6 +599,7 @@ function PlayCutModal({ onClose, onScrubToShot }: { onClose: () => void; onScrub
                 onLoadedMetadata={(e) => setDur(e.currentTarget.duration)}
                 onTimeUpdate={(e) => {
                   setCur(e.currentTarget.currentTime);
+                  onPlayhead?.(e.currentTarget.currentTime);
                   const idx = segIdxOf(e.currentTarget.currentTime);
                   if (idx !== lastSegRef.current && onScrubToShot) {
                     lastSegRef.current = idx;
@@ -439,7 +608,7 @@ function PlayCutModal({ onClose, onScrubToShot }: { onClose: () => void; onScrub
                 }}
                 onPlay={() => setPlaying(true)}
                 onPause={() => setPlaying(false)}
-                onEnded={() => setPlaying(false)}
+                onEnded={() => { setPlaying(false); onPlayhead?.(null); }}
               />
               <div className="pl-controls">
                 <button className="pl-play" onClick={togglePlay} title={playing ? "Pause" : "Play"}>{playing ? "⏸" : "▶"}</button>
@@ -482,6 +651,18 @@ const TIMELINE_ZOOM_DEFAULT = 2;
 /** Tiles never render narrower than this many seconds of scale, so even a 1s shot can
  *  hold its controls. The ruler uses the same widths, so it stays aligned either way. */
 const TIMELINE_MIN_SEC = 4;
+
+/**
+ * H3's single-generation ceiling, in seconds.
+ *
+ * This was hardcoded to 12 here while the engine clamped to 15, so a 13-15s shot
+ * was impossible to reach by dragging even though the model can render it, and
+ * the tile tooltip asserted a limit the engine did not have. The backend owns
+ * the real constant (MAX_SHOT_SECONDS in backend/src/types.ts) and exposes it
+ * through the settings/status payload; this is the fallback used before that
+ * arrives, and the two are asserted equal by the timeline check.
+ */
+const TIMELINE_MAX_SEC = 15;
 /** Horizontal space between tiles — mirrored by the gap on .timeline-track and
  *  .timeline-ruler in styles.css, so every pixel calculation here lines up with paint. */
 const TIMELINE_GAP = 6;
@@ -548,11 +729,10 @@ function animateScroll(el: HTMLElement, to: number, dur = 260): () => void {
  *  click-to-select. It is now the Script tab's primary view; the inspector below is
  *  the detail view. All project-wide actions (rename, +shot, render, chain, structure
  *  all, play cut) live in its toolbar. */
-function ShotTimeline({ project, assets, selId, onSelect, onSplit, onPlayCut, activeJob, freeFormCount, structuredCount, onStructureAll, onRename, onAddShot, onRender, onReorder, onResize, onDuplicate, onDelete, onAcceptTake, structingId, onStructShot, onStructMenu, onSetStillMode, zoom, onZoom }: {
+function ShotTimeline({ project, assets, selId, onSelect, onSplit, onPlayCut, activeJob, freeFormCount, structuredCount, onStructureAll, onRename, onAddShot, onAddShotAt, onDragSettled, canUndo, onUndo, batch, multiSel, playhead, onRender, onReorder, onResize, onDuplicate, onDelete, onAcceptTake, structingId, onStructShot, onStructMenu, onSetStillMode, zoom, onZoom }: {
   project: Project;
   assets: LibraryAsset[];
   selId: string | null;
-  onSelect: (id: string) => void;
   onSplit?: (shotId: string) => void;
   onPlayCut?: () => void;
   activeJob: RenderJob | null;
@@ -561,6 +741,26 @@ function ShotTimeline({ project, assets, selId, onSelect, onSplit, onPlayCut, ac
   onStructureAll: () => void;
   onRename: (name: string) => void;
   onAddShot: () => void;
+  /** Insert a shot at a slot (0 = first, shots.length = append). */
+  onAddShotAt?: (index: number) => void;
+  /** A drag-reorder just committed; swallow the click that follows it. */
+  onDragSettled?: () => void;
+  canUndo?: boolean;
+  onUndo?: () => void;
+  /**
+   * Batch toolbar, owned by ScriptView but rendered by the timeline so it sits
+   * with the other project-wide actions. Only shown when anySelected is true.
+   */
+  batch?: {
+    count: number;
+    anySelected: boolean;
+    chain: () => void;
+    unchain: () => void;
+    render: () => void;
+    structure: () => void;
+    remove: () => void;
+    clear: () => void;
+  };
   onRender: (shotIds: string[], forceChain?: boolean) => void;
   onReorder: (from: number, to: number) => void;
   onResize: (shotId: string, seconds: number) => void;
@@ -574,8 +774,16 @@ function ShotTimeline({ project, assets, selId, onSelect, onSplit, onPlayCut, ac
   /** Index into TIMELINE_ZOOMS; onZoom steps it from the toolbar control. */
   zoom: number;
   onZoom: (dir: 1 | -1) => void;
+  onSelect: (id: string, ev?: React.MouseEvent) => void;
+  /** Ids in the shift-click batch selection, for the tile's selected outline. */
+  multiSel: Set<string>;
+  /** Current playhead position in seconds within the cut, or null when stopped. */
+  playhead?: number | null;
 }) {
   const pxPerSec = TIMELINE_ZOOMS[clamp(zoom, 0, TIMELINE_ZOOMS.length - 1)];
+  // The engine's real ceiling, once Settings has loaded; the constant is only a
+  // pre-load fallback.
+  const maxSec = useUi().settings?.limits?.maxShotSeconds ?? TIMELINE_MAX_SEC;
   const [drag, setDrag] = useState<{ from: number; to: number } | null>(null);
   const [resize, setResize] = useState<{ id: string; seconds: number } | null>(null);
   const suppressClick = useRef(false);
@@ -601,6 +809,32 @@ function ShotTimeline({ project, assets, selId, onSelect, onSplit, onPlayCut, ac
   });
   const total = cum;
   const hasOkTake = project.shots.some((s) => s.takes.some((t) => t.status === "ok"));
+
+  /**
+   * The playhead's x offset, in the same pixel space as the ruler.
+   *
+   * The ruler segments are not uniform (each is a shot's own width), so the
+   * playhead has to be placed by walking the segments rather than by scaling
+   * `time * pxPerSec` — otherwise it would drift against the tick labels
+   * whenever the min-width floor made a short shot wider than its duration.
+   */
+  const playheadPx = (() => {
+    if (playhead == null) return 0;
+    let x = 0;
+    for (let i = 0; i < rulerSegs.length; i++) {
+      const seg = rulerSegs[i];
+      if (playhead <= seg.at) break;
+      const dur = (resize && resize.id === ordered[i]?.id ? resize.seconds : ordered[i]?.seconds) ?? 0;
+      if (playhead < seg.at + dur) {
+        // Inside a shot: scale by the real px/second, not the floored tile width,
+        // so the line moves smoothly while a sub-4s shot is drawn wide.
+        x += (playhead - seg.at) * pxPerSec;
+        return x;
+      }
+      x += seg.width;
+    }
+    return x;
+  })();
 
   // Drop-caret: a visible "drop here" line at the left edge of the target slot (the
   // boundary the grabbed tile will land on), so the destination stays clear during
@@ -674,6 +908,7 @@ function ShotTimeline({ project, assets, selId, onSelect, onSplit, onPlayCut, ac
       if (cur.to !== cur.from) {
         onReorder(cur.from, cur.to);
         suppressClick.current = true; // don't let the drop select a different tile
+        onDragSettled?.();
         // Keep the just-moved tile in view: after an auto-scroll the drop can land far
         // off-screen, so smooth-scroll the container to bring that tile back into view.
         const el = scrollRef.current;
@@ -698,8 +933,14 @@ function ShotTimeline({ project, assets, selId, onSelect, onSplit, onPlayCut, ac
     raf = requestAnimationFrame(tick);
   };
 
-  /** Edge-drag: the right-edge handle resizes the shot's duration (1–12s, 0.5 steps),
-   *  previewing live via local state and committing on release. */
+  /**
+   * Edge-drag: the right-edge handle resizes the shot's duration in 0.5s steps,
+   * previewing live via local state and committing on release.
+   *
+   * The ceiling is H3's real single-generation limit, taken from the server so
+   * this handle cannot claim a range the engine will not render. It used to be a
+   * local 12 while the engine allowed 15, making 13-15s unreachable by dragging.
+   */
   const startResize = (e: React.PointerEvent, shot: Shot) => {
     if (e.button !== 0) return;
     e.preventDefault();
@@ -708,7 +949,7 @@ function ShotTimeline({ project, assets, selId, onSelect, onSplit, onPlayCut, ac
     const move = (ev: PointerEvent) => {
       const dx = ev.clientX - e.clientX;
       const sec = Math.round(((startSec * pxPerSec + dx) / pxPerSec) * 2) / 2;
-      setResize({ id: shot.id, seconds: Math.min(12, Math.max(1, sec)) });
+      setResize({ id: shot.id, seconds: Math.min(maxSec, Math.max(1, sec)) });
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
@@ -754,7 +995,41 @@ function ShotTimeline({ project, assets, selId, onSelect, onSplit, onPlayCut, ac
             : `Rewrites ${freeFormCount} free-form prompt${freeFormCount === 1 ? "" : "s"}${structuredCount ? ` · ${structuredCount} already structured will be skipped` : ""} — review each result before applying.`}>
           ⧉ Structure all ({freeFormCount})
         </button>
+        {batch && batch.anySelected && (
+          <div className="tl-batch" title="Batch actions for the selected shots — shift-click tiles to build a range">
+            <span className="chip">{batch.count} selected</span>
+            <button className="small" onClick={batch.chain} title="Each selected shot continues from the previous selected shot's final frame">
+              🔗 Chain
+            </button>
+            <button className="small" onClick={batch.unchain} title="Remove continue-from-previous from the selection">
+              Unchain
+            </button>
+            <button
+              className="small"
+              disabled={!!activeJob || !!renderBlocked}
+              title={renderBlocked || "Render every selected shot"}
+              onClick={batch.render}
+            >
+              ▶ Render {batch.count}
+            </button>
+            <button className="small" onClick={batch.structure} title="Structure the selected shots and everything after them">
+              ⧉ Structure
+            </button>
+            <button className="small tl-act-danger" onClick={batch.remove} title="Delete the selected shots and their media">
+              ✕ Delete {batch.count}
+            </button>
+            <button className="small" onClick={batch.clear} title="Clear the selection">Clear</button>
+          </div>
+        )}
         <div className="grow" />
+        <button
+          className="small"
+          disabled={!canUndo}
+          onClick={onUndo}
+          title={canUndo ? "Undo the last change (Ctrl+Z)" : "Nothing to undo"}
+        >
+          ↶ Undo
+        </button>
         {/* Zoom lives in the always-visible toolbar so the timeline can be made as big
             or as overview-y as the work of the moment needs. */}
         <div className="tl-zoom" title="Timeline zoom — how many pixels one second of shot duration is worth">
@@ -778,6 +1053,14 @@ function ShotTimeline({ project, assets, selId, onSelect, onSplit, onPlayCut, ac
         ) : (
           <>
             <div className="timeline-ruler">
+              {/* The "now" line: where the running cut is. A director reading the
+                  timeline needs to know which shot they are looking at mid-review,
+                  and the PlayCut player already knows this time. */}
+              {playhead != null && (
+                <div className="tl-playhead" style={{ left: playheadPx }} title={`Playhead at ${fmtDur(playhead)}`}>
+                  <span className="tl-playhead-label">{fmtDur(playhead)}</span>
+                </div>
+              )}
               {rulerSegs.map((seg, i) => (
                 <div key={ordered[i].id} className="tl-ruler-seg" style={{ width: seg.width }} title={`shot starts at ${seg.at.toFixed(1)}s`}>
                   <span>{fmtDur(seg.at)}</span>
@@ -800,7 +1083,7 @@ function ShotTimeline({ project, assets, selId, onSelect, onSplit, onPlayCut, ac
                     selected={s.id === selId && !isDrag}
                     dragging={isDrag}
                     structing={s.id === structingId}
-                    onSelect={select}
+                    onSelect={onSelect}
                     onPointerDown={(e) => startDrag(e, origIndex)}
                     onResizeStart={(e) => startResize(e, s)}
                     onSplit={onSplit}
@@ -812,6 +1095,9 @@ function ShotTimeline({ project, assets, selId, onSelect, onSplit, onPlayCut, ac
                     onStructClick={(e) => { e.stopPropagation(); onStructShot(s); }}
                     onStructMenu={(e) => onStructMenu(e, origIndex)}
                     onSetStillMode={onSetStillMode}
+                    maxSec={maxSec}
+                    inMulti={multiSel.has(s.id)}
+                    onInsertBefore={() => onAddShotAt?.(origIndex)}
                   />
                 );
               })}
@@ -824,15 +1110,33 @@ function ShotTimeline({ project, assets, selId, onSelect, onSplit, onPlayCut, ac
   );
 }
 
-/** Cap on reference images per shot - mirrors MAX_REFS in ImagesView. */
-const MAX_SHOT_REFS = 8;
+/**
+ * Reference caps. These MUST match the engine, which silently drops anything beyond
+ * them at render time (PICTURE_MAX / VIDEO_MAX / AUDIO_MAX in backend/src/engine.ts);
+ * showing 0 / 9 while only ever allowing 8 would be a lie. The still-stage editor
+ * matches ImagesView's MAX_REFS of 8.
+ */
+const REF_IMAGE_MAX = 9;
+const REF_VIDEO_MAX = 3;
+const REF_AUDIO_MAX = 3;
+const STILL_REF_MAX = 8;
+
+/**
+ * Append new ids to a reference list, keeping order, dropping duplicates (re-attaching
+ * an asset that is already there must not duplicate it) and capping at `max`.
+ */
+function mergeRefs(current: string[], next: string[], max: number): string[] {
+  const out = [...current];
+  for (const id of next) if (!out.includes(id)) out.push(id);
+  return out.slice(0, max);
+}
 
 /** True when a drag carries OS files (not a tile being reordered, not a text selection). */
 function dragHasFiles(e: React.DragEvent): boolean {
   return !!e.dataTransfer && Array.from(e.dataTransfer.types ?? []).includes("Files");
 }
 
-function TimelineTile({ shot, index, width, thumbH, assets, selected, dragging, structing, onSelect, onPointerDown, onResizeStart, onSplit, onRender, onDuplicate, onDelete, activeJob, onAcceptTake, onStructClick, onStructMenu, onSetStillMode }: {
+function TimelineTile({ shot, index, width, thumbH, assets, selected, dragging, structing, onSelect, onPointerDown, onResizeStart, onSplit, onRender, onDuplicate, onDelete, activeJob, onAcceptTake, onStructClick, onStructMenu, onSetStillMode, inMulti, onInsertBefore }: {
   shot: Shot;
   index: number;
   width: number;
@@ -842,7 +1146,7 @@ function TimelineTile({ shot, index, width, thumbH, assets, selected, dragging, 
   selected: boolean;
   dragging: boolean;
   structing: boolean;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, ev?: React.MouseEvent) => void;
   onPointerDown: (e: React.PointerEvent) => void;
   onResizeStart: (e: React.PointerEvent) => void;
   onSplit?: (shotId: string) => void;
@@ -854,7 +1158,15 @@ function TimelineTile({ shot, index, width, thumbH, assets, selected, dragging, 
   onStructClick: (e: React.MouseEvent) => void;
   onStructMenu: (e: React.MouseEvent) => void;
   onSetStillMode?: (shotId: string, mode: "t2i" | "i2i" | "none") => void;
+  /** H3's real per-shot ceiling, so the tooltips above cannot lie about it. */
+  maxSec?: number;
+  /** Part of the shift-click batch selection. */
+  inMulti?: boolean;
+  /** Insert a new shot immediately before this one. */
+  onInsertBefore?: () => void;
 }) {
+  const uiCtx = useUi();
+  const maxSec = uiCtx.settings?.limits?.maxShotSeconds ?? TIMELINE_MAX_SEC;
   const lastOk = [...shot.takes].reverse().find((t) => t.status === "ok");
   const firstFrame = shot.firstFrameId ? assets.find((a) => a.id === shot.firstFrameId) : undefined;
   const refImage = shot.kind === "r2v" && shot.imageIds[0] ? assets.find((a) => a.id === shot.imageIds[0]) : undefined;
@@ -873,6 +1185,26 @@ function TimelineTile({ shot, index, width, thumbH, assets, selected, dragging, 
     if (t.status !== "ok") return; // error takes can't be accepted
     onAcceptTake(shot.id, t.id, !t.accepted);
   };
+  /**
+   * These are role="button" spans so they can sit inside the draggable tile
+   * without each one being a real <button> (which would swallow the pointer
+   * events the drag handler relies on). That left them focusable but inert for
+   * keyboard users, so give them the activation keys a button is expected to
+   * have. Enter and Space both fire click on a real button, so they must here.
+   */
+  const keyActivate = (fn: () => void) => (e: React.KeyboardEvent) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    e.stopPropagation();
+    fn();
+  };
+  const actProps = (title: string, fn: () => void) => ({
+    role: "button" as const,
+    tabIndex: 0,
+    title,
+    onClick: (e: React.MouseEvent) => { e.stopPropagation(); fn(); },
+    onKeyDown: keyActivate(fn),
+  });
   const { renderBlocked } = useUi();
   const currentMode: "t2i" | "i2i" | "none" = shot.still?.mode ?? "none";
 
@@ -910,10 +1242,11 @@ function TimelineTile({ shot, index, width, thumbH, assets, selected, dragging, 
 
     if (shot.kind === "r2v") {
       // r2v drives the engine from its reference list, so the images go there.
-      const added = uploaded.filter((id) => !shot.imageIds.includes(id));
-      if (added.length) mutateShot(shot.id, { imageIds: [...shot.imageIds, ...added].slice(0, MAX_SHOT_REFS) });
-      toast(added.length
-        ? `Added ${added.length} reference image${added.length === 1 ? "" : "s"} to "${shot.name || "Untitled"}"`
+      const merged = mergeRefs(shot.imageIds, uploaded, REF_IMAGE_MAX);
+      const added = merged.length - shot.imageIds.length;
+      mutateShot(shot.id, { imageIds: merged });
+      toast(added
+        ? `Added ${added} reference image${added === 1 ? "" : "s"} to "${shot.name || "Untitled"}"`
         : "Those images are already references on this shot");
       return;
     }
@@ -924,10 +1257,7 @@ function TimelineTile({ shot, index, width, thumbH, assets, selected, dragging, 
     const [first, ...rest] = uploaded;
     const patch: Partial<Shot> = { firstFrameId: first, continueFromPrev: false };
     if (shot.kind === "t2v") patch.kind = "i2v";
-    if (rest.length) {
-      const added = rest.filter((id) => !shot.imageIds.includes(id));
-      if (added.length) patch.imageIds = [...shot.imageIds, ...added].slice(0, MAX_SHOT_REFS);
-    }
+    if (rest.length) patch.imageIds = mergeRefs(shot.imageIds, rest, REF_IMAGE_MAX);
     mutateShot(shot.id, patch);
     toast(rest.length
       ? `Set the first frame of "${shot.name || "Untitled"}" and added ${rest.length} more as reference${rest.length === 1 ? "" : "s"}`
@@ -941,9 +1271,9 @@ function TimelineTile({ shot, index, width, thumbH, assets, selected, dragging, 
 
   return (
     <div
-      className={`tl-tile ${selected ? "sel" : ""} ${shot.continueFromPrev ? "chained" : ""} ${dragging ? "tl-drag" : ""} ${dropping ? "tl-file-over" : ""}`}
+      className={`tl-tile ${selected ? "sel" : ""} ${inMulti ? "tl-multi" : ""} ${shot.continueFromPrev ? "chained" : ""} ${dragging ? "tl-drag" : ""} ${dropping ? "tl-file-over" : ""}`}
       style={{ width, "--tl-thumb-h": `${thumbH}px` } as React.CSSProperties}
-      onClick={() => onSelect(shot.id)}
+      onClick={(e) => onSelect(shot.id, e)}
       onPointerDown={onPointerDown}
       onDragEnter={(e) => {
         if (!dragHasFiles(e)) return;
@@ -973,7 +1303,7 @@ function TimelineTile({ shot, index, width, thumbH, assets, selected, dragging, 
         setDropping(false);
         if (dragHasFiles(e)) void onFilesDropped(e.dataTransfer.files);
       }}
-      title={`${index + 1}. ${shot.name || "Untitled"} — ${fmtDur(shot.seconds)}${shot.continueFromPrev ? " · continues from previous shot's final frame" : ""}\nDrag to reorder · drag the right edge to change the length (1–12s)`}
+      title={`${index + 1}. ${shot.name || "Untitled"} — ${fmtDur(shot.seconds)}${shot.continueFromPrev ? " · continues from previous shot's final frame" : ""}\nDrag to reorder · drag the right edge to change the length (1–${maxSec}s)`}
     >
       {/* Control row lives ABOVE the frame, never on top of it: the mode switcher and
           the action buttons share this flex row, so they can no longer collide with each
@@ -1022,18 +1352,17 @@ function TimelineTile({ shot, index, width, thumbH, assets, selected, dragging, 
         <span className="tl-head-fill" />
 
         <div className="tl-actions" onPointerDown={(e) => e.stopPropagation()}>
-            <span className="tl-act" role="button" tabIndex={0} title={renderBlocked || "Render this shot"}
-              onClick={stop(() => { if (!renderBlocked) onRender([shot.id]); })}>▶</span>
+            <span className="tl-act" {...actProps(renderBlocked || "Render this shot", () => { if (!renderBlocked) onRender([shot.id]); })}>▶</span>
             {onSplit && !compact && (
-              <span className="tl-act" role="button" tabIndex={0} title="Split this shot into two consecutive shots"
-                onClick={stop(() => onSplit(shot.id))}>✂</span>
+              <span className="tl-act" {...actProps("Split this shot into two consecutive shots", () => onSplit(shot.id))}>✂</span>
             )}
             {!compact && (
-              <span className="tl-act" role="button" tabIndex={0} title="Duplicate this shot"
-                onClick={stop(() => onDuplicate(shot.id))}>⧉</span>
+              <span className="tl-act" {...actProps("Duplicate this shot", () => onDuplicate(shot.id))}>⧉</span>
             )}
-            <span className="tl-act tl-act-danger" role="button" tabIndex={0} title="Delete this shot"
-              onClick={stop(() => onDelete(shot.id))}>✕</span>
+            {onInsertBefore && !compact && (
+              <span className="tl-act" {...actProps("Insert a new shot directly before this one", () => onInsertBefore())}>＋</span>
+            )}
+            <span className="tl-act tl-act-danger" {...actProps("Delete this shot", () => onDelete(shot.id))}>✕</span>
         </div>
       </div>
       <div className="tl-thumb">
@@ -1052,7 +1381,7 @@ function TimelineTile({ shot, index, width, thumbH, assets, selected, dragging, 
             <div className="tl-ph-sub">{currentMode !== "none" ? "Stage 1 ready" : "Direct video"}</div>
           </div>
         )}
-        <div className="tl-resize" title="Drag to change the duration (1–12s)" onPointerDown={onResizeStart} />
+        <div className="tl-resize" title={`Drag to change the duration (1–${maxSec}s)`} onPointerDown={onResizeStart} />
         {dropping && (
           <div className="tl-file-hint">
             <span className="tl-file-hint-icon">🖼</span>
@@ -1171,19 +1500,47 @@ function StillStage({ shot, imageAssets }: { shot: Shot; imageAssets: LibraryAss
     }
   };
 
+  /**
+   * Queue a still render. The server used to block this request for the whole
+   * multi-minute render, so the button sat on "Rendering…" with no feedback and
+   * a second click could put two jobs on the GPU. It now returns an ImageJob
+   * immediately and the work is serialized with every other GPU job; the bus
+   * tells us when it lands.
+   */
   const renderStill = async () => {
     setErr("");
     setBusy(true);
     try {
-      const updated = await api.renderShotStill(p.id, shot.id);
-      ui.mutateShot(shot.id, { still: updated.still, firstFrameId: updated.firstFrameId, kind: updated.kind });
-      ui.toast("Still rendered — it is now this shot's first frame");
+      const job = await api.renderShotStill(p.id, shot.id);
+      setPendingJob(job.id);
+      ui.toast("Still queued — it will render as soon as the GPU is free");
     } catch (e) {
       setErr((e as Error).message);
-    } finally {
       setBusy(false);
     }
   };
+
+  // While our own still job is in flight the button stays busy; the shot's
+  // `still` block arrives over the bus, so we clear it there.
+  const [pendingJob, setPendingJob] = useState<string | null>(null);
+  useEffect(() => {
+    if (!pendingJob) return;
+    return onBusEvent((ev) => {
+      if (ev.type === "shotStillDone" && ev.jobId === pendingJob) {
+        setPendingJob(null);
+        setBusy(false);
+        void ui.refreshAll();
+        ui.toast("Still rendered — it is now this shot's first frame");
+      }
+      if (ev.type === "imageJobDone" && ev.jobId === pendingJob) {
+        const data = ev.data as { status?: string; error?: string } | undefined;
+        setPendingJob(null);
+        setBusy(false);
+        if (data?.status === "error") setErr(data.error ?? "The still render failed.");
+        void ui.refreshAll();
+      }
+    });
+  }, [pendingJob, ui]);
 
   const useTake = async (takeId: string) => {
     setErr("");
@@ -1219,8 +1576,9 @@ function StillStage({ shot, imageAssets }: { shot: Shot; imageAssets: LibraryAss
       </Field>
 
       {still.mode === "i2i" && (
-        <MultiPicker title="Reference images to edit" kind="image" ids={still.imageIds} assets={imageAssets}
-          onToggle={(id) => patch({ imageIds: toggle(still.imageIds, id) })} tagOf={(i) => `ref ${i + 1}`} />
+        <MultiPicker title="Reference images to edit" kind="image" ids={still.imageIds} assets={imageAssets} max={STILL_REF_MAX}
+          onToggle={(id) => patch({ imageIds: toggle(still.imageIds, id) })}
+          onAttach={(ids) => patch({ imageIds: mergeRefs(still.imageIds, ids, STILL_REF_MAX) })} tagOf={(i) => `ref ${i + 1}`} />
       )}
 
       <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(150px,1fr))" }}>
@@ -1416,12 +1774,15 @@ function ShotInspector({ shot }: { shot: Shot }) {
       {shot.kind === "r2v" && (
         <>
           <div className="grid" style={{ gridTemplateColumns: "1fr" }}>
-            <MultiPicker title="Reference images (character / location / style)" kind="image" ids={shot.imageIds} assets={imageAssets}
-              onToggle={(id) => up({ imageIds: toggle(shot.imageIds, id) })} tagOf={(i) => `<Picture ${i + 1}>`} />
-            <MultiPicker title="Reference videos (motion / edit)" kind="video" ids={shot.videoIds} assets={videoAssets}
-              onToggle={(id) => up({ videoIds: toggle(shot.videoIds, id) })} tagOf={(i) => `<Video ${i + 1}>`} />
-            <MultiPicker title="Voice / audio references (dialogue voice)" kind="audio" ids={shot.audioIds} assets={audioAssets}
-              onToggle={(id) => up({ audioIds: toggle(shot.audioIds, id) })} tagOf={(i) => `<Audio ${i + 1}>`} />
+            <MultiPicker title="Reference images (character / location / style)" kind="image" ids={shot.imageIds} assets={imageAssets} max={REF_IMAGE_MAX}
+              onToggle={(id) => up({ imageIds: toggle(shot.imageIds, id) })}
+              onAttach={(ids) => up({ imageIds: mergeRefs(shot.imageIds, ids, REF_IMAGE_MAX) })} tagOf={(i) => `<Picture ${i + 1}>`} />
+            <MultiPicker title="Reference videos (motion / edit)" kind="video" ids={shot.videoIds} assets={videoAssets} max={REF_VIDEO_MAX}
+              onToggle={(id) => up({ videoIds: toggle(shot.videoIds, id) })}
+              onAttach={(ids) => up({ videoIds: mergeRefs(shot.videoIds, ids, REF_VIDEO_MAX) })} tagOf={(i) => `<Video ${i + 1}>`} />
+            <MultiPicker title="Voice / audio references (dialogue voice)" kind="audio" ids={shot.audioIds} assets={audioAssets} max={REF_AUDIO_MAX}
+              onToggle={(id) => up({ audioIds: toggle(shot.audioIds, id) })}
+              onAttach={(ids) => up({ audioIds: mergeRefs(shot.audioIds, ids, REF_AUDIO_MAX) })} tagOf={(i) => `<Audio ${i + 1}>`} />
           </div>
           {shot.audioIds.length > 0 && <div className="muted small">Voice clips are automatically linked to dialogue: “All speech is in the voice of the person in &lt;Audio N&gt;.”</div>}
           {r2vTags.length > 0 && (
@@ -1998,24 +2359,77 @@ function KeyframePicker({ title, assetId, assets, onChange, hint }: { title: str
   );
 }
 
-function MultiPicker({ title, kind, ids, assets, onToggle, tagOf }: {
+function MultiPicker({ title, kind, ids, assets, onToggle, onAttach, max, tagOf }: {
   title: string;
   kind: LibraryAsset["kind"];
   ids: string[];
   assets: LibraryAsset[];
+  /** Toggle a reference off (the ✕ on an attached row). */
   onToggle: (id: string) => void;
+  /** Add new references: either an option picked in the dropdown, or files just uploaded. */
+  onAttach: (ids: string[]) => void;
+  /** Cap for this slot; the label and the button both honour it. */
+  max: number;
   tagOf: (index: number) => string;
 }) {
+  const ui = useUi();
   const [pending, setPending] = useState("");
+  const [busy, setBusy] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
   const opts = assets.filter((a) => !ids.includes(a.id));
   // Keep a row even when the asset is gone, so a deleted-then-attached id stays
   // visible and removable instead of silently vanishing from the list.
   const used = ids.map((id) => ({ id, a: assets.find((x) => x.id === id) }));
+  const full = used.length >= max;
+  const accept = kind === "image" ? "image/*" : kind === "video" ? "video/*" : "audio/*";
+
+  /** The + button: attach the dropdown pick if there is one, otherwise choose files. */
+  const add = async () => {
+    if (busy || full) return;
+    if (pending) {
+      onAttach([pending]);
+      setPending("");
+      return;
+    }
+    fileRef.current?.click();
+  };
+
+  /** Upload freshly chosen files, then attach them in a single call so a multi-file
+   *  selection isn't merged through repeated onToggle calls over a stale list. */
+  const takeFiles = async (list: FileList | null) => {
+    if (!list || !list.length) return;
+    const room = max - used.length;
+    const files = Array.from(list);
+    if (files.length > room) {
+      ui.toast(`"${title}" holds ${max} — only the first ${room} will be attached.`, "err");
+    }
+    setBusy(true);
+    try {
+      const added: string[] = [];
+      for (const f of files.slice(0, room)) {
+        try {
+          const a = await api.uploadAsset(f);
+          added.push(a.id);
+        } catch (e) {
+          ui.toast(`Upload of ${f.name} failed: ${(e as Error).message}`, "err");
+        }
+      }
+      if (added.length) {
+        await ui.refreshAll();
+        onAttach(added);
+        ui.toast(`Added ${added.length} ${kind}${added.length === 1 ? "" : "s"}`);
+      }
+    } finally {
+      setBusy(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
   return (
     <div className="panel" style={{ background: "var(--bg)", padding: 10 }}>
       <div className="row" style={{ justifyContent: "space-between" }}>
         <label style={{ margin: 0 }}>{title}</label>
-        <span className="muted small">{used.length}{kind === "image" ? " / 9" : kind === "video" ? " / 3" : " / 3"}</span>
+        <span className="muted small">{used.length} / {max}</span>
       </div>
       {used.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 4, margin: "6px 0" }}>
@@ -2036,11 +2450,25 @@ function MultiPicker({ title, kind, ids, assets, onToggle, tagOf }: {
         </div>
       )}
       <div className="row">
-        <select className="grow" value={pending} onChange={(e) => setPending(e.target.value)}>
-          <option value="">— add {kind} —</option>
+        <select className="grow" value={pending} disabled={full}
+          onChange={(e) => setPending(e.target.value)}>
+          <option value="">{full ? `— ${max} attached (remove one first) —` : `— add ${kind} from Library —`}</option>
           {opts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
         </select>
-        <button className="small" disabled={!pending} onClick={() => { if (pending) onToggle(pending); setPending(""); }}>＋</button>
+        <button
+          className="small"
+          disabled={busy || full}
+          title={full
+            ? `This slot is full (${max}/${max}) — remove one to add another`
+            : pending
+              ? `Attach "${assets.find((a) => a.id === pending)?.name ?? ""}" to this shot`
+              : `Choose ${kind} file(s) from your computer to add as reference (${used.length}/${max} attached)`}
+          onClick={() => void add()}
+        >
+          {busy ? "…" : "＋"}
+        </button>
+        <input ref={fileRef} type="file" accept={accept} multiple hidden
+          onChange={(e) => { void takeFiles(e.target.files); e.target.value = ""; }} />
       </div>
       {pending && opts.filter((a) => a.id === pending).map((a) => (
         <div key={a.id} className="row" style={{ marginTop: 6, gap: 8 }}>
@@ -2052,7 +2480,7 @@ function MultiPicker({ title, kind, ids, assets, onToggle, tagOf }: {
           <span className="muted small grow">About to attach: {a.name}</span>
         </div>
       ))}
-      {ids.length === 0 && <div className="muted small" style={{ marginTop: 6 }}>None attached.</div>}
+      {ids.length === 0 && <div className="muted small" style={{ marginTop: 6 }}>None attached. Press ＋ to pick from the Library or choose a file.</div>}
     </div>
   );
 }

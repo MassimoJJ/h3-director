@@ -332,6 +332,40 @@ body.tl-resizing-v {
   gap: 6px; /* matches .timeline-track so each label sits over its tile */
   height: 20px;
   padding-right: 4px;
+  position: relative; /* anchor for the absolute .tl-playhead */
+}
+/* The playhead: where the assembled cut currently is, drawn over the ruler so a
+   director can see which shot they are reviewing without leaving the timeline.
+   Absolutely positioned inside .timeline-ruler, which is position: relative. */
+.tl-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 2px solid #f43f5e;
+  pointer-events: none;
+  z-index: 3;
+}
+.tl-playhead::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #f43f5e;
+}
+.tl-playhead-label {
+  position: absolute;
+  top: -1px;
+  left: 4px;
+  font-size: 10px;
+  color: #fecdd3;
+  background: rgba(244, 63, 94, 0.2);
+  padding: 0 3px;
+  border-radius: 3px;
+  white-space: nowrap;
 }
 .tl-ruler-seg {
   flex: 0 0 auto;
@@ -411,6 +445,30 @@ body.tl-resizing-v {
   border-color: #3b82f6;
   box-shadow: 0 0 0 2px #3b82f6, 0 8px 24px rgba(59, 130, 246, 0.28);
   z-index: 1;
+}
+/* Part of the shift-click batch selection. Distinct from .sel so it is obvious
+   which tile is the inspector's subject and which are just in the range. */
+.tl-tile.tl-multi {
+  border-color: #22d3ee;
+  box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.75);
+}
+.tl-tile.tl-multi.sel {
+  box-shadow: 0 0 0 2px #3b82f6, 0 0 0 4px rgba(34, 211, 238, 0.5);
+}
+/* The batch toolbar strip that appears in the timeline toolbar on selection. */
+.tl-batch {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  margin-right: 6px;
+  border: 1px solid rgba(34, 211, 238, 0.4);
+  background: rgba(34, 211, 238, 0.07);
+  border-radius: 6px;
+}
+.tl-batch .chip {
+  font-size: 11px;
+  color: #67e8f9;
 }
 .tl-tile.chained {
   border-left: 4px solid var(--accent) !important;
