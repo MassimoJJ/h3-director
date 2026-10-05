@@ -13,7 +13,9 @@
     "dev:web": "npm run dev -w web",
     "build": "npm run build -w web",
     "start": "npm run start -w backend",
-    "verify:timeline": "node scripts/timeline-align.check.cjs"
+    "verify:timeline": "node scripts/timeline-align.check.cjs",
+    "verify:store": "tsx scripts/store-safety.check.cjs",
+    "verify": "npm run typecheck && npm run build && npm run verify:store"
   },
   "engines": {
     "node": ">=20"

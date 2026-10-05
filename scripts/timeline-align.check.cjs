@@ -127,13 +127,69 @@ async function launch() {
   if (await sel.count()) await sel.selectOption({ index: 0 });
   await sleep(3000);
 
-  const tiles = await page.locator(".tl-tile").count();
+  // ---- self-seeding ------------------------------------------------------------
+  // This check used to be unrunnable unless the user happened to have a project
+  // with 2+ shots, so in practice it guarded nothing. When the open project is
+  // too small, create a THROWAWAY project with four shots, point the UI at it,
+  // and delete it at the end. Real user data is never touched.
+  const apiBase = TARGET.replace(/\/$/, "");
+  const seeded = { projectId: null, shots: [] };
+
+  const countShots = async () => (await page.locator(".tl-tile").count());
+  let tiles = await countShots();
   console.log("shots in project:", tiles);
+
+  if (tiles < 2) {
+    console.log("SEED   open project has < 2 shots; creating a throwaway project for this run");
+    try {
+      const created = await page.request.post(apiBase + "/api/projects", { data: { name: "verify-timeline-seed" } });
+      if (!created.ok()) throw new Error("create project returned HTTP " + created.status());
+      const proj = (await created.json()).project ?? await created.json();
+      seeded.projectId = proj.id;
+      // Durations deliberately differ (and one is sub-4s) so the ruler's
+      // min-width floor is exercised, not just equal-width tiles.
+      for (const [i, sec] of [2, 5, 7.5, 3].entries()) {
+        const r = await page.request.post(apiBase + "/api/projects/" + proj.id + "/shots", {
+          data: { name: "seed " + (i + 1), seconds: sec, prompt: "[Subject + Action] seed " + (i + 1) },
+        });
+        if (!r.ok()) throw new Error("add shot " + (i + 1) + " returned HTTP " + r.status());
+      }
+      const full = await (await page.request.get(apiBase + "/api/projects/" + proj.id)).json();
+      seeded.shots = full.shots.map((s) => s.id);
+
+      // Point the UI at the throwaway project. Selecting by VALUE (not index) is
+      // what matters: `selectOption({index: 0})` just picks whatever sorts first
+      // by updatedAt, which is normally the real project, not the one we seeded.
+      const optionValue = await page.locator("header select option", {
+        hasText: "verify-timeline-seed",
+      }).first().getAttribute("value").catch(() => null);
+      if (!optionValue) throw new Error("the seeded project did not appear in the project picker");
+      await page.locator("header select").first().selectOption(optionValue);
+      await sleep(2500);
+      tiles = await countShots();
+      console.log("SEED   throwaway project " + proj.id + " has " + tiles + " shots");
+    } catch (e) {
+      console.error("SEED   could not create a throwaway project: " + e.message);
+    }
+  }
+
   if (tiles < 2) {
     console.error("Need a project with at least 2 shots to test the timeline; found " + tiles + ".");
     await browser.close();
     process.exit(2);
   }
+
+  /** Remove the throwaway project again, whatever happened above. */
+  const cleanupSeed = async () => {
+    if (!seeded.projectId) return;
+    try {
+      const r = await page.request.delete(apiBase + "/api/projects/" + seeded.projectId);
+      console.log("SEED   cleaned up throwaway project " + seeded.projectId + " (HTTP " + r.status() + ")");
+    } catch (e) {
+      console.error("SEED   FAILED to delete throwaway project " + seeded.projectId + ": " + e.message);
+      failures.push("left a throwaway project behind: " + seeded.projectId);
+    }
+  };
 
   const step = async (which) => {
     const b = page.locator(".tl-zbtn").nth(which === "in" ? 1 : 0);
@@ -191,7 +247,6 @@ async function launch() {
   // never restores would shuffle the user's shot list on every run. Capture the real
   // order up front and put it back through the API afterwards.
   const projectId = await sel.inputValue().catch(() => "");
-  const apiBase = TARGET.replace(/\/$/, "");
   const originalShotIds = await (async () => {
     try {
       const r = await page.request.get(apiBase + "/api/projects/" + projectId);
@@ -229,6 +284,14 @@ async function launch() {
     let v1 = await vis();
     const swapped = v1.order[0] !== v0.order[0];
     if (!swapped) fail("drag did not reorder the shots");
+    // Track the moved tile BY NAME, not by index. The drag auto-scrolls, so the
+    // drop can land anywhere on the timeline — assuming it ended up at index 1
+    // tests the wrong tile and reports a false failure.
+    // Tile labels are "N. name", and N changes when the tile moves, so compare
+    // on the name alone — indexOf on the raw label would miss after a reorder.
+    const bare = (label) => String(label).replace(/^\d+\.\s*/, "");
+    const movedName = bare(v0.order[0]);
+    const movedIdx = () => v1.order.findIndex((l) => bare(l) === movedName);
     // The drop leaves drag-autoscroll momentum behind; the snap is a rAF animation, so sample
     // until the value stops changing and confirm it settles legal and in-view (the old gap-less
     // math could park the moved tile fully off-screen left).
@@ -237,10 +300,11 @@ async function launch() {
       await sleep(300);
       const s = await vis();
       settled = s;
+      v1 = { ...v1, order: s.order, tiles: s.tiles, scrollLeft: s.scrollLeft, scrollMax: s.scrollMax, vp: s.vp };
       if (Math.abs(s.scrollLeft - prevS) <= 1) break;
       prevS = s.scrollLeft;
     }
-    const sM = settled.tiles[1];
+    const sM = settled.tiles[movedIdx()];
     const sLegal = settled.scrollLeft >= 0 && settled.scrollLeft <= settled.scrollMax + 1;
     const sInView = sM && sM.l < settled.vp && sM.r > 0;
     console.log("SETTLE after " + (ticks * 300) + "ms scroll=" + settled.scrollLeft + "/" + settled.scrollMax
@@ -288,6 +352,8 @@ async function launch() {
     else console.log("REVERT final safety net restored the order to " + JSON.stringify(v0.order));
   }
   await page.screenshot({ path: OUT + "03-after-reload.png" });
+
+  await cleanupSeed();
 
   if (errors.length) { for (const e of errors.slice(0, 8)) fail(e); }
   console.log("JS ERRORS:", errors.length ? errors.slice(0, 8) : "none");
