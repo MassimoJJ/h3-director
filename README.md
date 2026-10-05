@@ -71,6 +71,34 @@ the backend after a successful start, restarting it if it crashes.
 `start.bat` calls exactly this, so double-clicking it and booting the PC do the same
 thing. Work history, open items and the verification recipe live in `TASK_HISTORY.md`.
 
+## Verifying a change
+
+```bash
+npm run verify          # typecheck + build + the store regression checks
+npm run verify:store    # data-safety regressions only (fast, no server needed)
+npm run verify:timeline # timeline geometry + drag/reorder, in a real browser
+```
+
+`verify:store` runs against a temp data directory and never touches your projects.
+`verify:timeline` needs the app running; if the open project has fewer than two shots it
+creates a throwaway project, tests against it and deletes it again.
+
+## Working with the timeline
+
+- **Shift-click** tiles to select a range; the batch bar then offers chain, unchain,
+  render N, structure, and delete N.
+- **Ctrl+Z** undoes the last structural change (reorder, resize, delete, accept, chain).
+  Deleting a shot deletes its media, so it still asks first.
+- **`+` on a tile** inserts a shot at that position; the toolbar `+ Shot` appends.
+- Edits save half a second after you stop typing. Anything that needs the saved copy
+  (rendering, exporting, switching project, closing the tab) flushes first, so what you
+  see is what renders.
+- Per-shot length is capped at **15 s** - H3's single-generation ceiling. Long films are
+  several shots; use **Seamless chain** and they cut together.
+- Failed renders are diagnosable: the graph that was sent is saved next to the shot's media
+  under `data/outputs/<project>/<shot>/graph_<promptId>.json`, and every job writes a log to
+  `data/logs/<jobId>.jsonl`.
+
 ## What you can do
 
 | Area | What it does |
@@ -152,6 +180,10 @@ Capabilities and safe defaults:
 
 - `data/` â€” projects, asset library, outputs, exports, job log (git-ignored).
 - `data/settings.json` â€” ComfyUI address/folder, VRAM purge toggle, LLM endpoint.
+- data/projects/*.json - written atomically (temp file + rename) with a .bak generation
+  beside each one, so an interrupted write can never truncate a project.
+- data/logs/<jobId>.jsonl - durable record of every render: seed, compiled prompt,
+  prompt id, warnings and errors.
 - The ComfyUI install itself is never modified; only `input/` and `output/` gain
   `h3director/â€¦` files while you render.
 

@@ -17,7 +17,13 @@ session, even a small one - a future session should start by reading the top two
 
 ## CURRENT STATUS
 
-**As of 2026-09-28 19:40**
+**As of 2026-09-28 20:30**
+
+- OK **The reference pickers' `＋` actually works now.** It was `disabled={!pending}`, so with
+  nothing chosen in the dropdown it was inert — "I hit plus and nothing happens". It now either
+  attaches the chosen Library item **or**, with nothing chosen, opens a file picker to upload
+  straight into that slot. Caps (9 image / 3 video / 3 audio) are enforced and shown honestly.
+  Verified in a real browser on all four paths; test data removed afterwards.
 
 - OK **Drop an image straight onto a shot tile**: files dragged in from Explorer now attach to
   *that* shot instead of falling through to the Library. First frame for t2v/i2v/fl2v (and the
@@ -47,6 +53,64 @@ session, even a small one - a future session should start by reading the top two
 
 ## SESSION LOG
 
+### 2026-09-28 (later, 2) — The reference picker's `＋` was inert
+
+**Reported:** "i hit plus nothing happens - do these functions work?" with a screenshot of the
+three REFERENCE IMAGES / VIDEOS / AUDIO panels.
+
+**Diagnosed, not guessed.** A headless run that read the real DOM settled it:
+
+```
+1) btn disabled with empty selection: true
+   imageIds after: []
+2) selectable assets: 22
+   btn disabled after selection: false
+   preview row shown: 1
+   AFTER imageIds: ["f8edc721-..."]      <- attach works
+```
+
+So `MultiPicker` was correct but unusable: `disabled={!pending}` meant the `＋` only woke up
+after you chose an item from the dropdown. Press it first — which is what anyone does — and
+nothing happens, with no hint why. `views.tsx:2043`.
+
+**Fix — `＋` now always has a job:**
+- A Library item chosen in the dropdown → attaches it (previous behaviour, kept).
+- Nothing chosen → opens a file picker, uploads, and attaches to *this* slot. So the panel can
+  be filled without a detour to the Library tab.
+- Uploads attach in **one** `onAttach(ids)` call rather than repeated `onToggle` per file —
+  each `onToggle` closes over the same `shot.imageIds`, so a multi-file selection would
+  otherwise race itself and keep only the last one.
+- Caps are now a `max` prop that the label, the dropdown and the button all read from, instead
+  of the label hard-coding `" / 9"` while the code capped at 8.
+
+**Caps corrected to match the engine.** `backend/src/engine.ts` uses `PICTURE_MAX = 9`,
+`VIDEO_MAX = 3`, `AUDIO_MAX = 3` and silently drops anything past them at render time. The UI
+was capping images at 8 while displaying 9 — one short. Now `REF_IMAGE_MAX = 9` etc., and the
+still-stage editor keeps `MAX_REFS` of 8 to match `ImagesView`. `MAX_SHOT_REFS` was removed so
+there is a single source of truth; the drop-onto-a-shot path from the previous session was
+updated to the same constant (it was the 8).
+
+**Four paths verified in a real browser, all PASS:**
+1. `＋` with nothing chosen → not disabled, hidden file input present, uploaded file attached.
+2. Choose a Library option → `＋` stays enabled, attaches, list grows by exactly 1.
+3. A second upload → no duplicate **ids** in the list.
+4. At 9/9 → `＋` disabled, dropdown disabled, `9 / 9` shown, nothing above the cap stored.
+
+**Two things I got wrong first, both in the test rather than the app:**
+- The panel locator filtered `.panel` by `hasText`, which matches every *ancestor* — so it kept
+  grabbing the parent and clicking "Structure prompt" instead. Fixed by anchoring on the label
+  and climbing to its own panel; the comment in the script says so.
+- Test 3 initially asserted "no duplicate files". That premise is wrong: `POST /api/assets`
+  always mints a new asset and never dedupes by content, which is why the Library already holds
+  `Pulling up.jpg` ×2 and `Man_stealing_watch…` ×3 *from before this work*. The real invariant
+  is no duplicate **ids**, which `mergeRefs` guarantees. I changed the assertion rather than
+  "fixing" correct backend behaviour.
+
+**Data restored and confirmed:** all 6 assets the tests uploaded were deleted through the API
+(library 28 → 22, the captured baseline), `Shot 2` refs returned to 0, and all three shots read
+back identical to `mp-base2.txt`. `npm run typecheck` and `npm run build` clean;
+`verify:timeline` still PASS.
+
 ### 2026-09-28 (later) — Drag an image from Explorer onto a shot
 
 **Requested:** "I should be able to drag and drop the images directly into the shots."
@@ -63,8 +127,9 @@ pointer was aimed at. The "use as first frame" flow only existed in the Images t
   chaining. Those are the same two rules the server applies in `useStillAsFirstFrame`
   (`backend/src/queue.ts:609`).
 - `r2v` shots get the images in `imageIds` instead — that kind drives the engine from its
-  reference list, so a first frame would be the wrong slot. Capped at `MAX_SHOT_REFS` (8),
-  mirroring `MAX_REFS` in `ImagesView`.
+  reference list, so a first frame would be the wrong slot. Capped at `REF_IMAGE_MAX` (9,
+  matching `PICTURE_MAX` in the engine; this was `MAX_SHOT_REFS` = 8 until the next session
+  found it was one short of what the label and the engine allow).
 - Extra images in one drop fill the reference list rather than being silently dropped.
 - Non-image files are refused by name instead of being quietly mis-filed.
 - Hovering a tile highlights it with a ring and an explicit **"Set as first frame"** /
@@ -505,5 +570,115 @@ Start-Process $chrome -ArgumentList @('--headless=new','--disable-gpu',"--user-d
   API, then read the persisted state back**. Undoing a drag with another drag is a rotation,
   not an inverse — and an assertion that checks the DOM "changed" will happily pass while the
   stored order is wrong. The DOM also lags the server, so trust the API, not the painted tiles.
+- **Never assume WHERE a drag lands.** The timeline auto-scrolls during a drag, so the drop
+  can end at any index. Track the moved tile by name (stripping the "N. " prefix, which
+  renumbers on move), never by a hardcoded index. That assumption caused two false failures.
+- **A check that needs data must create it and clean it up.** `verify:timeline` used to bail
+  out unless you happened to have a project with 2+ shots, so it guarded nothing. It now
+  seeds a throwaway project via the API, selects it **by option value** (index 0 just picks
+  whatever sorts first by updatedAt), and deletes it at the end. Give the seeded shots
+  different durations, or the ruler's min-width floor is never exercised.
 - Silence is not success. A verification step that prints nothing and exits 0 has verified
   nothing; every check needs a printed verdict and a non-zero exit on failure.
+
+---
+
+## SESSION - 2026-10-05, full audit + hardening (14:40-16:20)
+
+Started from an audit of the whole app with a focus on the timeline. Fixes in the order they
+were done; the first group is the one that actually loses work.
+
+### Data safety
+
+1. **A running render reverted every edit made while it ran.** `processRender` loaded the
+   project once and called `saveProject(project)` on that stale object after each take. Start
+   a render, fix a prompt on shot 12, and the render wrote the old prompt back. The
+   take-reattach in the PUT handler cannot help: that is browser->server, this was
+   queue->server. Fixed with three fresh-state store helpers - `appendShotTake`,
+   `appendStillTake`, `mutateShotOnDisk` - that re-read the project and write only what
+   changed. `processImage` already did this right; the render path now matches.
+
+2. **A crash mid-write could make a project vanish.** `saveProject` wrote straight onto the
+   live file, and `getProject`/`listProjects` swallowed the parse error, so a truncated
+   project disappeared from the picker with nothing in any log. Now: write `.tmp`, keep a
+   `.bak` generation, `renameSync` into place (atomic), and report corruption loudly via
+   `corruptReadCount()`; a corrupt file falls back to its `.bak`. `jobs.json` is quarantined
+   instead of silently reset. `library.json` is mtime-cached.
+
+3. **No `unhandledRejection` handler** - only `uncaughtException` was registered. The
+   persistence calls in `pumpRender` sit *outside* the try, so one failed save rejected
+   `void this.pumpRender()` and Node exited mid-render. Two lines, whole class of deaths.
+
+### Correctness
+
+4. **Export used the OLDEST successful take.** `acceptedTakeOf` used a forward `find`, and
+   nothing in the render path ever set `accepted: true`, so the fallback always picked take
+   #1 - re-render five times and export still gave the first attempt. Now reverse-finds, plus
+   a real accept endpoint for shot takes (there was none) and a take delete that unlinks the
+   media. Bad takes used to be permanent.
+
+5. **Still renders bypassed the GPU queue and could OOM the card.** The route awaited a
+   multi-minute render on the request thread, and the only concurrency guard lives inside
+   `pumpImage`, which it never touched - two clicks meant two simultaneous GPU jobs, plus a
+   hung HTTP request. Now queued via `enqueueShotStill` and dispatched by `pumpImage` like
+   everything else; the UI follows it over the bus. `imageJobs` is capped too.
+
+6. **The duration cap was 12 in the UI and 15 in the engine**, so a 13-15s shot was
+   unreachable by dragging while the tooltip asserted a limit the engine did not have. One
+   `MAX_SHOT_SECONDS = 15` in `types.ts`, shipped to the UI as `settings.limits`; timeline,
+   split route and engine all read it.
+
+7. **Changing `comfyUrl` in Settings never took effect** - one client bound at startup. Now
+   cached per URL and rebuilt on change.
+
+8. `splitPromptText` could return the whole prompt for *both* halves, duplicating it across
+   two shots. The split route now refuses instead.
+
+### Daily-use feel
+
+9. **Every keystroke PUT the whole project** (~200 KB per character on a 30-shot project,
+   23 handlers doing it). Now debounced 500 ms, one in-flight write, newest state queued
+   behind it, with `flushSave()` on blur, project switch, render queue, tab hide and unmount.
+   The poll skips itself while a save is pending so it cannot clobber an unsaved edit.
+
+10. **Undo** (Ctrl+Z and a toolbar button) for reorder, resize, delete, accept, chain and
+    still mode. Snapshot-based rather than inverse-based on purpose: a reorder's inverse is
+    another reorder, which is exactly how data gets lost. 40 deep, coalescing a burst on one
+    shot into a single step. Undo writes immediately, not on the debounce.
+
+11. **Shift-click multi-select** with a batch toolbar: chain, unchain, render N, structure,
+    delete N, clear. Selection is a Set of ids, not an index range, so it survives reorders.
+
+12. **Insert a shot at a position** (`+` on any tile) instead of only appending to the end.
+
+13. **A playhead on the ruler**, fed by the Play-cut player, so you can see which shot you are
+    reviewing without leaving the timeline. It walks the ruler segments rather than scaling
+    `time * pxPerSec`, because the min-width floor draws short shots wider than their real
+    duration - a naive scale drifts against the tick labels.
+
+14. **Tile action buttons are keyboard-operable.** They are `role="button"` spans (real
+    buttons would swallow the pointer events the drag handler needs), which left them
+    focusable but inert; Enter and Space now activate them.
+
+### Observability
+
+15. **Failed renders are debuggable.** The submitted graph is dumped next to the shot's media
+    on both the success and failure paths, ComfyUI's history entry is appended to it on
+    failure, error takes record their `promptId`, and a timeout now interrupts the engine
+    prompt instead of leaving a zombie render blocking the queue. Every job also writes a
+    durable JSONL log at `data/logs/<jobId>.jsonl` - the only previous record was a
+    WebSocket message to whichever browser happened to be open.
+
+### Verification added
+
+- `npm run verify:store` - regression checks for both data-loss bugs, the newest-take rule,
+  the accept invariant and the duration clamp. Runs against a temp data dir (`H3_DATA_DIR`),
+  never the live one. **Passes.**
+- `npm run verify:timeline` - now self-seeding and self-cleaning. **Passes** (it was
+  previously unrunnable without a suitable project).
+- `npm run verify` - typecheck + build + verify:store.
+
+Two bugs were caught by these checks rather than by reading: the seeding script used
+`selectOption({index: 0})`, which picked the wrong project, and the drop assertion assumed
+the moved tile always lands at index 1. Both were test bugs, not app bugs - which is the
+point of the check running at all.
