@@ -20,6 +20,15 @@ export type Tab = "script" | "images" | "library" | "gallery" | "export";
 /** Which project was open last time this browser loaded the app. */
 const PROJECT_KEY = "h3.projectId";
 
+/**
+ * How long to wait after the last keystroke before writing the project.
+ *
+ * Long enough that a typed word is one write, short enough that a pause in
+ * thinking still feels saved. Anything that needs the state flushed right now
+ * (blur, render, export, project switch, tab close) calls `flushSave`.
+ */
+const SAVE_DEBOUNCE_MS = 500;
+
 /** localStorage is best-effort (throws in restricted webviews), like the timeline keys. */
 function readStoredProjectId(): string | null {
   try {
@@ -43,6 +52,11 @@ export default function App() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [projects, setProjects] = useState<Array<{ id: string; name: string }>>([]);
   const [project, setProject] = useState<Project | null>(null);
+  // The newest project, readable from callbacks that would otherwise close over
+  // a stale copy. Save handlers run after the state update has been scheduled, so
+  // they must not depend on the `project` binding being current.
+  const projectRef = useRef<Project | null>(null);
+  projectRef.current = project;
   const [assets, setAssets] = useState<LibraryAsset[]>([]);
   const [jobs, setJobs] = useState<{ render: RenderJob[]; export: ExportJob[] }>({ render: [], export: [] });
   const [tab, setTab] = useState<Tab>("script");
@@ -166,11 +180,6 @@ export default function App() {
   }, [refreshAll]);
 
   useEffect(() => {
-    const iv = setInterval(() => void refreshAll(), 20000);
-    return () => clearInterval(iv);
-  }, [refreshAll]);
-
-  useEffect(() => {
     return onBusEvent((ev) => {
       if (ev.type === "job" || ev.type === "export") {
         if (!ev.projectId || ev.projectId === projectIdRef.current) void refreshAll();
@@ -187,25 +196,196 @@ export default function App() {
     });
   }, [refreshAll, toast]);
 
-  const selectProject = useCallback(async (id: string) => {
-    projectIdRef.current = id;
-    storeProjectId(id);
-    const p = await api.getProject(id).catch(() => null);
-    setProject(p);
-    setTab("script");
-  }, []);
+  // ---------------------------------------------------------------------
+  // Saving
+  //
+  // Every keystroke in the shot inspector used to PUT the ENTIRE project. On a
+  // 30-shot project with takes that is ~200 KB per character typed, and the
+  // server re-read + re-merged + re-stringified the whole file each time, so
+  // typing felt heavy long before the GPU was involved.
+  //
+  // Now: one in-flight PUT at a time, with the newest state queued behind it.
+  // The UI updates instantly; the write coalesces. `lastSavedRef` guarantees we
+  // never send a stale snapshot, and `drainSave` guarantees the final state
+  // always lands (on blur, unmount and before a render/export are queued).
+  const lastSavedRef = useRef<string | null>(null);
+  const inFlightRef = useRef(false);
+  const pendingRef = useRef<Project | null>(null);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveErrorRef = useRef(false);
 
-  const saveProject = useCallback(
+  /** Write `p` now if nothing is in flight, otherwise remember it as pending. */
+  const writeProject = useCallback(
     (p: Project) => {
-      setProject(p);
-      api.putProject(p).catch((e) => toast(`Save failed: ${e.message}`, "err"));
+      pendingRef.current = p;
+      if (inFlightRef.current) return;
+      const next = pendingRef.current;
+      pendingRef.current = null;
+      if (!next) return;
+      inFlightRef.current = true;
+      lastSavedRef.current = JSON.stringify(next);
+      api
+        .putProject(next)
+        .catch((e) => {
+          saveErrorRef.current = true;
+          toast(`Save failed: ${e.message}`, "err");
+        })
+        .finally(() => {
+          inFlightRef.current = false;
+          if (pendingRef.current) void writeProject(pendingRef.current);
+        });
     },
     [toast],
   );
 
+  /**
+   * Push the current project to the server, coalescing rapid edits.
+   * `immediate` flushes now instead of after the debounce — used on blur and
+   * before anything that reads the saved state (render, export, project switch).
+   */
+  const saveProject = useCallback(
+    (p: Project, immediate = false) => {
+      setProject(p);
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      if (immediate) {
+        writeProject(p);
+        return;
+      }
+      saveTimerRef.current = setTimeout(() => {
+        saveTimerRef.current = null;
+        writeProject(p);
+      }, SAVE_DEBOUNCE_MS);
+    },
+    [writeProject],
+  );
+
+  /**
+   * Force any debounced write out now. Safe to call when nothing is pending.
+   * Also used before switching projects and on tab close, so an edit can never
+   * be lost or land against the wrong project.
+   */
+  const flushSave = useCallback(() => {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    const p = pendingRef.current ?? projectRef.current;
+    if (p) writeProject(p);
+  }, [writeProject]);
+
+  // Switching projects or closing the tab with a debounced edit pending would
+  // otherwise lose it. These must be registered after flushSave exists.
+  useEffect(() => {
+    const flush = () => flushSave();
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", flush);
+      flush();
+    };
+  }, [flushSave]);
+
+  // The 20s poll must not overwrite an edit that has not been written yet.
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (saveTimerRef.current || inFlightRef.current) return;
+      const p = projectRef.current;
+      if (p && lastSavedRef.current && JSON.stringify(p) !== lastSavedRef.current) return;
+      void refreshAll();
+    }, 20000);
+    return () => clearInterval(t);
+  }, [refreshAll]);
+
+  // ---------------------------------------------------------------------
+  // Undo
+  //
+  // Reorder, resize, delete, mode switch and take-accept all commit instantly and
+  // used to be irreversible — a mis-drag across 15 shots had no way back except
+  // redoing the work by hand. This keeps the last N project snapshots in memory
+  // so Ctrl+Z (and the toolbar button) can step back.
+  //
+  // Deliberately snapshot-based rather than per-action inverse: a reorder's
+  // inverse is another reorder, and getting that wrong is how data gets lost.
+  // Storing whole snapshots is simple and provably correct, at the cost of
+  // memory — which is why the stack is capped and holds no media (takes are
+  // references to files, not bytes).
+  /** A project snapshot plus the metadata that makes the undo message useful. */
+  interface UndoEntry {
+    project: Project;
+    label: string;
+    shotId?: string;
+    at: number;
+  }
+  const undoStack = useRef<UndoEntry[]>([]);
+  const [undoDepth, setUndoDepth] = useState(0);
+  const UNDO_LIMIT = 40;
+
+  /**
+   * Record the state to return TO, i.e. call this BEFORE mutating.
+   * Coalesces a burst of related edits (a drag, a resize) into one undo step by
+   * ignoring repeats of the same shot within a short window.
+   */
+  const pushUndo = useCallback((label: string, shotId?: string) => {
+    const p = projectRef.current;
+    if (!p) return;
+    const top = undoStack.current[undoStack.current.length - 1];
+    const now = Date.now();
+    if (top && shotId && top.shotId === shotId && now - top.at < 700) {
+      top.at = now;
+      return; // still the same gesture
+    }
+    undoStack.current.push({ project: structuredClone(p), label, shotId, at: now });
+    if (undoStack.current.length > UNDO_LIMIT) undoStack.current.shift();
+    setUndoDepth(undoStack.current.length);
+  }, []);
+
+  const undoTimeline = useCallback(() => {
+    const entry = undoStack.current.pop();
+    if (!entry) return;
+    setUndoDepth(undoStack.current.length);
+    // Undo is a user-visible state change like any other edit: write it
+    // immediately, or a reload could resurrect what the user just undid.
+    saveProject(entry.project, true);
+    toast(`Undone: ${entry.label}`);
+  }, [saveProject, toast]);
+
+  const canUndoTimeline = undoDepth > 0;
+
+  // Ctrl+Z / Ctrl+Shift+Z, ignored while typing in a field.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      const typing = !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+      if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== "z") return;
+      if (typing) return; // let the field have its own undo
+      e.preventDefault();
+      undoTimeline();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [undoTimeline]);
+
+  // Switching projects with an unsaved edit pending would write the old project
+  // into the newly selected one. Force the write out before the id changes.
+  const selectProject = useCallback(
+    async (id: string) => {
+      flushSave();
+      projectIdRef.current = id;
+      storeProjectId(id);
+      const p = await api.getProject(id).catch(() => null);
+      setProject(p);
+      setTab("script");
+    },
+    [flushSave],
+  );
+
   const mutateShot = useCallback(
     (shotId: string, patch: Partial<Shot>) => {
-      const p = project;
+      const p = projectRef.current;
       if (!p) return;
       const next: Project = {
         ...p,
@@ -213,20 +393,24 @@ export default function App() {
       };
       saveProject(next);
     },
-    [project, saveProject],
+    [saveProject],
   );
 
   const renderShots = useCallback(
     (shotIds: string[], forceChain = false) => {
       const pid = project?.id;
       if (!pid) return;
+      // The queue reads prompts and durations from the SAVED project, so a
+      // debounced edit must land before the render starts or it renders the
+      // previous version of the shot.
+      flushSave();
       api
         .render(pid, shotIds, forceChain)
         .then(() => toast(forceChain ? "Chained render queued — shots will continue from one another" : "Render queued"))
         .catch((e) => toast(`Could not queue render: ${e.message}`, "err"))
         .finally(() => void refreshAll());
     },
-    [project, toast, refreshAll],
+    [project, toast, refreshAll, flushSave],
   );
 
   // ---------- ComfyUI engine start / stop ----------
@@ -298,6 +482,10 @@ export default function App() {
     toast,
     renderShots,
     openMedia,
+    flushSave,
+    undo: undoTimeline,
+    canUndo: canUndoTimeline,
+    pushUndo,
     assetsById: new Map(assets.map((a) => [a.id, a])),
   };
 

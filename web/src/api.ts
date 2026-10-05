@@ -234,6 +234,11 @@ export interface AppSettings {
   /** Minutes one still/board image render may run before it is abandoned. */
   imageTimeoutMin: number;
   director: { provider: string; model: string };
+  /**
+   * The engine's own limits, so the UI never asserts a duration the renderer
+   * would refuse. Sourced from MAX_SHOT_SECONDS on the backend.
+   */
+  limits: { maxShotSeconds: number; minShotSeconds: number };
   keys: Record<string, ProviderKeyMeta>;
 }
 
@@ -291,10 +296,31 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ ...(patch ?? {}), ...(mode ? { mode } : {}) }),
     }),
-  renderShotStill: (projectId: string, shotId: string) =>
-    http<Shot>(`/api/projects/${projectId}/shots/${shotId}/still/render`, { method: "POST", body: "{}" }),
+  /**
+   * Queue a still render. Returns the ImageJob immediately — the server no longer
+   * blocks the request for the whole render, it serializes the work through the
+   * same GPU pump as everything else and reports progress over the bus.
+   */
+  renderShotStill: (projectId: string, shotId: string, count = 1) =>
+    http<ImageJob>(`/api/projects/${projectId}/shots/${shotId}/still/render`, {
+      method: "POST",
+      body: JSON.stringify({ count }),
+    }),
   useShotStill: (projectId: string, shotId: string, takeId: string) =>
     http<Shot>(`/api/projects/${projectId}/shots/${shotId}/still/takes/${takeId}/use`, { method: "POST", body: "{}" }),
+
+  /** Accept or un-accept one video take — decides what Play cut and Export use. */
+  acceptShotTake: (projectId: string, shotId: string, takeId: string, accepted: boolean) =>
+    http<{ project: Project; shot: Shot }>(
+      `/api/projects/${projectId}/shots/${shotId}/takes/${takeId}/accept`,
+      { method: "POST", body: JSON.stringify({ accepted }) },
+    ),
+  /** Delete one take and its media. */
+  deleteShotTake: (projectId: string, shotId: string, takeId: string) =>
+    http<{ project: Project; shot: Shot; removed: string[] }>(
+      `/api/projects/${projectId}/shots/${shotId}/takes/${takeId}`,
+      { method: "DELETE" },
+    ),
 
   assets: () => http<LibraryAsset[]>("/api/assets"),
   uploadAsset: (file: File, role?: string) => {
