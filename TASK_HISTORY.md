@@ -4,6 +4,11 @@ Running log of what we did, what broke, what is verified, and where to pick up n
 **Newest work is at the top of "Session log".** Add an entry at the top for every work
 session, even a small one - a future session should start by reading the top two entries.
 
+> Public-release note: this is a historical development log from the original machine.
+> Absolute paths, account names and Chrome-profile defaults mentioned in old entries were
+> generalized in the shipped scripts; the log is kept for the reasoning and verification
+> trail, not as setup instructions. Use [docs/INSTALLATION.md](docs/INSTALLATION.md) to install.
+
 | | |
 | --- | --- |
 | Project root | `E:\ComfyUI_windows_portable_nvidia\h3-director` |
@@ -46,7 +51,7 @@ session, even a small one - a future session should start by reading the top two
 - OK **Pre-flight guard live**: Verified live via direct HTTP `POST` that render attempts while ComfyUI is down reject immediately with HTTP 409 and clear instruction.
 - OK **Configurable timeouts live**: Verified live via `/api/settings` that `renderTimeoutMin` (25) and `imageTimeoutMin` (20) are loaded and active.
 - OK **UI build live**: Web client bundle includes all button disabling/hover tooltips and new Settings controls.
-- OK **Chrome Profile**: Defaults to `Profile 1` (Mahmoud Gham); works seamlessly with user's dual-profile Chrome setup.
+- OK **Chrome Profile**: Defaults to `Profile 1` (the secondary Chrome profile); works seamlessly with user's dual-profile Chrome setup.
 - WARN **Stills/Images pipeline**: Paused per user direction ("stop about the image pipeline I will tell you"). Awaiting user instruction before making any changes.
 
 ---
@@ -285,14 +290,14 @@ from disk).
 **Audit correction:** `app.ts:498` does `fs.rmSync(req.file.path)` right after `addAsset`, so the
 multer temp file IS cleaned up — audit item 8 was wrong.
 
-### 2026-09-27 (evening, later) — UI opens in Mahmoud's Chrome profile + full app audit
+### 2026-09-27 (evening, later) — UI opens in the secondary Chrome profile's Chrome profile + full app audit
 
-**Requested:** "the app should open the chrome: Mahmoud Gham ghammahmoud@gmail.com and not the
+**Requested:** "the app should open the chrome: the secondary Chrome profile secondary account and not the
 other one".
 
 - Chrome here has two profiles under `%LOCALAPPDATA%\Google\Chrome\User Data`: `Default` =
-  "Your Chrome" (**massimojaver@gmail.com**) and **`Profile 1` = "Mahmoud"
-  (ghammahmoud@gmail.com)**; `last_used: Profile 1`.
+  "Your Chrome" (**primary account**) and **`Profile 1` = the secondary profile
+  (secondary account)**; `last_used: Profile 1`.
 - `scripts/start-h3-director.ps1` now launches Chrome explicitly with
   `--profile-directory="Profile 1"` (new `-ChromeProfile` parameter, default `"Profile 1"`;
   `none` = system default browser). New helpers: `Find-Chrome` (Program Files,

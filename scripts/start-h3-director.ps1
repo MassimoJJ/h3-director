@@ -8,9 +8,9 @@
 # to launch (run_nvidia_gpu.bat, or the app's "Start" button in the top bar). If it
 # is already running the launcher only notes that, so it can never start a second one.
 #
-# The UI opens in the Chrome profile signed in as Mahmoud Gham (ghammahmoud@gmail.com,
-# profile directory "Profile 1"). Change that with -ChromeProfile "Default", or pass
-# -ChromeProfile none to let Windows pick the default browser.
+# The UI opens in the system default browser. If you need a specific Chrome
+# identity, pass -ChromeProfile "Profile 1" (or set H3_CHROME_PROFILE). Pass
+# -ChromeProfile none to force the default browser explicitly.
 #
 # Logs:
 #   logs\autostart.log          launcher decisions and restarts
@@ -29,17 +29,16 @@ param(
   # screen at logon and start the engine only when a render is actually wanted.
   [switch]$WithComfy,
 
-  # Which Chrome profile the UI opens in. "Profile 1" is the one signed in as
-  # Mahmoud Gham <ghammahmoud@gmail.com>; the Default profile on this PC belongs to
-  # a different account, so the URL must not be handed to Windows. Use "none" to
-  # fall back to the system default browser.
-  [string]$ChromeProfile = "Profile 1"
+  # Optional Chrome profile directory, e.g. "Profile 1". Defaults to the
+  # H3_CHROME_PROFILE environment variable, or the system default browser when
+  # that variable is unset. Use "none" to force the default browser.
+  [string]$ChromeProfile = $env:H3_CHROME_PROFILE
 )
 
 $ErrorActionPreference = "Continue"
 
-$root    = "E:\ComfyUI_windows_portable_nvidia\h3-director"
-$comfyHome = "E:\ComfyUI_windows_portable_nvidia\ComfyUI_windows_portable"
+# Resolve paths from this script, so the repo can live anywhere.
+$root    = Split-Path -Parent $PSScriptRoot
 $logs    = Join-Path $root "logs"
 if (-not (Test-Path $logs)) { New-Item -ItemType Directory -Force -Path $logs | Out-Null }
 
@@ -52,16 +51,28 @@ function Write-Log([string]$msg) {
 # --- read app settings so we follow whatever port the UI actually uses -------
 $port     = 8788
 $comfyUrl = "http://127.0.0.1:8188"
+$comfyRoot = ""
 $settingsPath = Join-Path $root "data\settings.json"
 if (Test-Path $settingsPath) {
   try {
     $s = Get-Content $settingsPath -Raw | ConvertFrom-Json
-    if ($s.port)     { $port = [int]$s.port }
-    if ($s.comfyUrl) { $comfyUrl = [string]$s.comfyUrl }
+    if ($s.port)      { $port = [int]$s.port }
+    if ($s.comfyUrl)  { $comfyUrl = [string]$s.comfyUrl }
+    if ($s.comfyRoot) { $comfyRoot = [string]$s.comfyRoot }
   } catch { Write-Log "settings.json unreadable: $($_.Exception.Message)" }
 }
 $comfyPort = 8188
 try { $comfyPort = ([uri]$comfyUrl).Port } catch {}
+
+# The portable launcher (.bat) lives one level above the ComfyUI folder. Accept
+# either that portable root or the ComfyUI folder itself in settings/env.
+$comfyHome = $env:H3_COMFY_HOME
+if (-not $comfyHome -and $comfyRoot) {
+  if (Test-Path (Join-Path $comfyRoot "run_nvidia_gpu.bat")) { $comfyHome = $comfyRoot }
+  elseif (Test-Path (Join-Path (Split-Path -Parent $comfyRoot) "run_nvidia_gpu.bat")) { $comfyHome = Split-Path -Parent $comfyRoot }
+  else { $comfyHome = $comfyRoot }
+}
+if (-not $comfyHome) { $comfyHome = Split-Path -Parent $root }
 
 function Test-Port([int]$p) {
   $c = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue
@@ -129,10 +140,9 @@ function Test-Backend {
 }
 
 # --- opening the UI ----------------------------------------------------------
-# Chrome is launched explicitly, with the Mahmoud profile, instead of handing the
-# URL to Windows: this PC has two Chrome profiles and the Default one belongs to a
-# different Google account, so the Windows default-browser hand-off opened the app
-# under the wrong identity.
+# Chrome is launched explicitly when a profile is named, instead of handing the
+# URL to Windows: on machines with several Chrome profiles the system hand-off
+# can open the app under the wrong Google account.
 function Find-Chrome {
   $paths = @(
     "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
@@ -169,8 +179,9 @@ function Get-RunningChromeProfiles {
     } | Where-Object { $_ } | Select-Object -Unique
 }
 
-# Open the UI in the right browser identity. Logged, because a window appearing on
-# screen is otherwise an invisible side effect of a hidden script.
+# Open the UI in a named Chrome profile when asked, otherwise in the default
+# browser. A named profile is useful when the machine has several Google
+# accounts and the wrong one would otherwise receive the link.
 function Open-Ui {
   $url = "http://127.0.0.1:$port/"
   $chrome = Find-Chrome

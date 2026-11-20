@@ -16,7 +16,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$root   = "E:\ComfyUI_windows_portable_nvidia\h3-director"
+$root   = Split-Path -Parent $PSScriptRoot
 $vbs    = Join-Path $root "scripts\start-h3-director-hidden.vbs"
 $taskNm = "H3 Director Studio"
 $lnkNm  = "H3 Director Studio.lnk"
