@@ -540,9 +540,8 @@ export async function renderShot(opts: RenderInputs): Promise<ShotRenderResult> 
     if (res.ok) {
       fs.renameSync(tmp, videoAbs);
       plan.warnings.push(
-        `Conformed: frame ${which === "first" ? "0" : "end"} replaced with the exact ${
-          which === "first" ? "first-frame keyframe" : "last-frame keyframe"
-        } (H3 only conditions on keyframes, it does not copy them).`,
+        `Conformed: ${which === "first" ? "the exact first-frame keyframe was held and blended into the generated motion" : "frame end replaced with the exact last-frame keyframe"} ` +
+        "(H3 only conditions on keyframes, it does not copy them).",
       );
     } else {
       fs.rmSync(tmp, { force: true });

@@ -72,7 +72,7 @@ Everything runs locally. No account, telemetry or cloud service is required for 
 | **Video generation** | Stage 2: `t2v` text-to-video, `i2v` first-frame image, `fl2v` first **and** last frame locked, `r2v` character / location / voice references. H3 writes picture and sound in one pass. |
 | **Character lock** | One source portrait per project or shot. Attached to Qwen stills and to H3 as an identity-only reference: behind the seam frame as `<Picture 2>` when continuing (the seam is `<Picture 1>`, written back to frame 0, and its location/camera are locked for the whole shot), otherwise as `<Picture 1>`. Existing picture tags are shifted. Attaching it switches stage 2 to reference mode. |
 | **References** | Content-hashed staging into `ComfyUI/input/h3director/`; up to 9 images, 3 videos and 3 audio references per shot. A chained identity-locked shot reserves one video slot for the previous clip. Drag an image from Explorer straight onto a shot tile. |
-| **Seamless chain** | The checkbox **Continue from previous shot's final frame (seamless)** extracts the exact previous last frame and conforms it as the next clip's first frame. Measured seams: PSNR about 37 dB. |
+| **Seamless chain** | The checkbox **Continue from previous shot's final frame (seamless)** extracts the exact previous last frame, holds it at the start of the next clip and dissolves into the generated motion, so the cut does not jump. Frame rate, frame count and audio are preserved. |
 | **Queue** | Serial render queue with live WebSocket updates, per-shot re-render, cancel, durable JSONL job logs and saved compiled graphs. |
 | **Gallery & export** | Accept the best take of each shot, inspect its seed and exact prompt, then concatenate accepted takes into one MP4 with ffmpeg. |
 | **AI co-director** | Any OpenAI-compatible endpoint - Ollama, LM Studio, OpenAI, Gemini, Grok, OpenRouter, OpenCode, KiloCode, Cline or a custom URL - writes the shot list. |
@@ -216,8 +216,9 @@ feed shots; promote a still to the Library and attach it if you want to use it.
 
 The continuity control is the checkbox **Continue from previous shot's final frame
 (seamless)** in Stage 2. It is not a prompt hint: the backend extracts the previous
-shot's accepted last frame, resamples it exactly as the ComfyUI node does and replaces
-frame 0 of the next clip. Frame rate, frame count and audio are preserved.
+shot's accepted last frame, resamples it exactly as the ComfyUI node does, holds it for
+6 frames and dissolves into the generated motion over the next 12. Frame rate, frame
+count and audio are preserved.
 
 ![The seamless continuity checkbox in a shot](docs/screenshots/seamless-continuity.png)
 

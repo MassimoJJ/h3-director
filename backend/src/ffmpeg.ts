@@ -101,8 +101,8 @@ export interface ConformResult {
  *
  * For a director tool the seam has to be exact, so we conform it in post: the keyframe
  * is resampled exactly like the node does it (cover-scale + centre crop to the clip
- * canvas, comfy.utils.common_upscale(..., "center")) and swapped in, keeping the frame
- * count, the fps and the audio stream untouched.
+ * canvas, comfy.utils.common_upscale(..., "center")), held for 6 frames, then dissolved
+ * into the generated motion over 12 frames. Frame count, fps and audio are untouched.
  */
 export async function conformFrame(
   videoAbs: string,
@@ -117,6 +117,43 @@ export async function conformFrame(
 
   const fps = info.fps > 0 ? info.fps : 24;
   const { width: w, height: h } = info;
+
+  // A one-frame swap is not enough: H3 regenerates frame 1 from its conditioning
+  // image, so the cut jumps immediately after the exact frame-0 conform. Hold the
+  // real previous final frame for a few frames, then dissolve into the generated
+  // motion. The clip duration is unchanged and its audio is untouched.
+  const HOLD_FRAMES = 6;
+  const FADE_FRAMES = 12;
+  if (which === "first" && info.frames > HOLD_FRAMES + FADE_FRAMES) {
+    const bridge = HOLD_FRAMES + FADE_FRAMES;
+    const keyStream =
+      `[1:v]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,` +
+      `format=yuv420p,fps=${fps},trim=end_frame=${bridge},setpts=PTS-STARTPTS[kf]`;
+    const keepStream =
+      `[0:v]trim=start_frame=${HOLD_FRAMES},setpts=PTS-STARTPTS,fps=${fps},format=yuv420p[rest]`;
+    const chain =
+      `[kf][rest]xfade=transition=fade:duration=${FADE_FRAMES / fps}:offset=${HOLD_FRAMES / fps}[v]`;
+    try {
+      await run(
+        FFMPEG,
+        [
+          "-y", "-i", videoAbs,
+          "-loop", "1", "-framerate", String(fps), "-i", framePng,
+          "-filter_complex", `${keyStream};${keepStream};${chain}`,
+          "-map", "[v]", "-map", "0:a?",
+          "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-pix_fmt", "yuv420p",
+          "-c:a", "aac", "-b:a", "192k",
+          "-movflags", "+faststart",
+          outAbs,
+        ],
+        600_000,
+      );
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, reason: e instanceof Error ? e.message.slice(0, 400) : String(e) };
+    }
+  }
+
   const keyStream =
     `[1:v]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,` +
     `format=yuv420p,trim=end_frame=1,setpts=PTS-STARTPTS[kf]`;

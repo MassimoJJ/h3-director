@@ -185,7 +185,9 @@ For a director tool the seam must be exact, so `conformFrame()`:
 1. probes the rendered clip for width, height, fps and frame count;
 2. resamples the keyframe exactly like the node does - cover-scale, centre crop,
    `yuv420p`;
-3. replaces frame 0 (or the last frame) with that image;
+3. holds that image for 6 frames, then dissolves into the generated motion over the
+   next 12 frames (a one-frame swap alone still jumped at frame 1, measured 17.9 dB
+   PSNR between frames 0 and 1);
 4. keeps the frame count, fps and audio stream;
 5. re-encodes with `libx264 -crf 16`, `aac 192k` and `+faststart`.
 
