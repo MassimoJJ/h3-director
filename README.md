@@ -1,31 +1,58 @@
 ﻿# H3 Director Studio
 
-A local director's desk for **MiniMax H3** video generation.
+A local director's desk for **MiniMax H3** image **and** video generation.
 
-H3 Director Studio gives you a real shot timeline - first/last frames, character and voice
-references, take management and seamless long-video chaining - while your existing
-**ComfyUI** installation stays headless in the background as the render engine. You work
-like an editor, not like someone assembling node graphs by hand.
+H3 Director Studio is a complete local studio around your existing ComfyUI install. In
+one shot you can:
 
-![Timeline and shot inspector](docs/screenshots/timeline.png)
+- generate the picture with **Qwen Image 2.1** using **text -> image** or
+  **image -> image** editing of Library references;
+- animate it with **H3** as text-to-video, first-frame, first+last-frame, or with
+  character / location / voice references;
+- tick **Continue from previous shot's final frame (seamless)** so the next clip starts
+  from an exact copy of the previous shot's last frame.
+
+You generate stills, keep the takes you like, promote them into the Library, reuse them
+as first frames or references, then render video with synchronized audio and export the
+accepted takes as one film. ComfyUI stays headless in the background as the render
+engine. You work like an editor, not like someone assembling node graphs by hand.
+
+![Timeline with a still stage and a direct video shot](docs/screenshots/still-and-video-modes.png)
+
+![Stage 1 picture, Stage 2 animation, and the seamless continuity toggle](docs/screenshots/seamless-continuity.png)
 
 > Independent open-source project. Not affiliated with MiniMax, Alibaba/Qwen or ComfyUI.
 > The repository contains **no model weights**. Model downloads are governed by their own licenses.
 
 ---
 
-## Why this exists
+## What it solves
 
 ComfyUI is an excellent engine, but a node canvas is a poor editing surface for a film.
-A director thinks in shots, takes, continuity and exports. This project keeps ComfyUI
-as the engine and adds the layer that was missing:
+A director thinks in shots, takes, continuity and exports. H3 Director keeps ComfyUI as
+the engine and adds the layer that was missing:
 
-- a **timeline** where each shot has its own mode and parameters;
-- a **Library** of characters, places, motion clips and voices with roles and tags;
-- a **two-stage shot pipeline**: generate a still with Qwen Image 2.1, then animate it with H3;
-- **exact seams** between shots by conforming the previous shot's final frame into the next one;
-- a **render queue**, per-shot takes, accept/reject, and a one-click H.264/AAC export;
-- an optional **AI co-director** that turns a logline into a structured shot list.
+1. **Two models, one shot.** Image generation and video generation are not separate
+   projects. Stage 1 creates or edits the picture with Qwen Image 2.1
+   (`text -> image` or `image -> image`); Stage 2 animates that exact picture with H3.
+   You can also skip Stage 1 and go straight to video.
+2. **A real timeline.** Shots can be reordered, resized, duplicated, split, selected as
+   a range and chained. Each shot carries its own mode, prompt, duration, seed,
+   sampler, references and still-stage settings.
+3. **Long films despite a 15-second ceiling.** H3 cannot render more than 15 seconds in
+   one pass. The app splits a film into shots and, when
+   **Continue from previous shot's final frame (seamless)** is enabled, overwrites the
+   next clip's first frame with the previous clip's exact last frame. The cut is
+   frame-identical, not merely a similar-looking prompt continuation.
+4. **Takes instead of throwaway renders.** Every still and video render becomes a take
+   with its seed, prompt, graph and log. Compare variants, promote the best image to
+   the Library, accept the best video, and export only accepted takes.
+5. **Real references and voice.** Characters, locations, motion clips and voices live
+   in a tagged Library. Reference files are content-hashed and staged into ComfyUI, so
+   `<Picture N>`, `<Video N>` and `<Audio N>` always point at the bytes you intended.
+6. **Reproducibility and safety.** The exact graph sent to ComfyUI is saved beside the
+   take, every job has a JSONL log, projects are written atomically with backups, and
+   the whole runtime `data/` directory stays out of git.
 
 Everything runs locally. No account, telemetry or cloud service is required for the core app.
 
@@ -36,10 +63,10 @@ Everything runs locally. No account, telemetry or cloud service is required for 
 | Area | What you get |
 | --- | --- |
 | **Timeline** | Add, duplicate, split, reorder and resize shots. Shift-click a range for batch chain / render / delete. Ctrl+Z undoes structural changes. |
-| **Shot modes** | `t2v` text-to-video, `i2v` first-frame image, `fl2v` first **and** last frame locked, `r2v` character / location / voice references. |
-| **Still stage** | Per shot: `none`, `t2i` (Qwen writes the picture) or `i2i` (Qwen edits Library references). Up to 4 variants, random or fixed seeds, its own take list. |
+| **Still / image generation** | Stage 1 per shot: `none`, `t2i` **text-to-image** (Qwen writes the picture) or `i2i` **image-to-image** (Qwen edits Library references). Up to 4 variants, random or fixed seeds, its own take list. |
+| **Video generation** | Stage 2: `t2v` text-to-video, `i2v` first-frame image, `fl2v` first **and** last frame locked, `r2v` character / location / voice references. H3 writes picture and sound in one pass. |
 | **References** | Content-hashed staging into `ComfyUI/input/h3director/`; up to 9 images, 3 videos and 3 audio references per shot. Drag an image from Explorer straight onto a shot tile. |
-| **Seamless chain** | "Continue from previous shot" extracts the exact previous last frame and conforms it as the next clip's first frame. Measured seams: PSNR about 37 dB. |
+| **Seamless chain** | The checkbox **Continue from previous shot's final frame (seamless)** extracts the exact previous last frame and conforms it as the next clip's first frame. Measured seams: PSNR about 37 dB. |
 | **Queue** | Serial render queue with live WebSocket updates, per-shot re-render, cancel, durable JSONL job logs and saved compiled graphs. |
 | **Gallery & export** | Accept the best take of each shot, inspect its seed and exact prompt, then concatenate accepted takes into one MP4 with ffmpeg. |
 | **AI co-director** | Any OpenAI-compatible endpoint - Ollama, LM Studio, OpenAI, Gemini, Grok, OpenRouter, OpenCode, KiloCode, Cline or a custom URL - writes the shot list. |
@@ -132,14 +159,19 @@ Exact filenames, target folders and CLI download commands are in
 1. Start ComfyUI (`run_nvidia_gpu.bat`) and wait until `http://127.0.0.1:8188` answers.
 2. Start H3 Director (`npm start` or `start.bat`) and open `http://127.0.0.1:8788`.
 3. In **Settings**, check the probe: ComfyUI up, required nodes present, models listed.
-4. On the **Script** tab, add a shot. Write a prompt: subject, action, environment,
-   camera and sound. Choose a mode and duration (0.5-15 s).
-5. Press **Render**. Watch progress in the top bar and open the take in **Gallery**.
-6. Accept the take, then press **Export** to write one MP4 with every accepted shot.
+4. On the **Script** tab, add a shot. Under **Stage 1 - make the picture**, choose
+   `No still`, `Text -> image` or `Image -> image`. Under **Stage 2 - animate it**,
+   choose `Text -> video`, `First frame`, `First + last frame` or a reference mode.
+5. Write a prompt: subject, action, environment, camera and sound. Choose a duration
+   (0.5-15 s). Press **Render still** first if Stage 1 is enabled, then **Render** for
+   the video.
+6. Open the take in **Gallery**, accept it, then press **Export** to write one MP4 with
+   every accepted shot.
 
-For a longer film, add several shots and use **Seamless chain** so shot N+1 starts from
-the exact final frame of shot N. Long films are several shots by design: H3 cannot
-generate more than 15 seconds in one pass.
+For a longer film, add several shots and tick
+**Continue from previous shot's final frame (seamless)** on each shot after the first.
+Shot N+1 then starts from the exact final frame of shot N. Long films are several shots
+by design: H3 cannot generate more than 15 seconds in one pass.
 
 More recipes and prompt guidance: [docs/WORKFLOWS.md](docs/WORKFLOWS.md).
 
@@ -160,12 +192,32 @@ Every shot can run as two stages:
      t2v | i2v | fl2v | r2v  ->  MP4 take with audio
 ```
 
+Stage 1 is real image generation, not a placeholder: `t2i` writes a new picture from
+text, while `i2i` edits one or more Library images and follows their composition. The
+result is a normal image take that can be inspected, kept, promoted to the Library and
+reused elsewhere.
+
 Rendering a **still** only runs stage 1 and promotes the chosen take to the shot's
 first frame. Rendering the **shot** runs both stages, so the still made in that run is
 the real first frame. Older projects without a still block load unchanged as `none`.
 
 The separate **Stills** tab is a look-development scratchpad. It does not automatically
 feed shots; promote a still to the Library and attach it if you want to use it.
+
+---
+
+## Seamless continuity
+
+The continuity control is the checkbox **Continue from previous shot's final frame
+(seamless)** in Stage 2. It is not a prompt hint: the backend extracts the previous
+shot's accepted last frame, resamples it exactly as the ComfyUI node does and replaces
+frame 0 of the next clip. Frame rate, frame count and audio are preserved.
+
+![The seamless continuity checkbox in a shot](docs/screenshots/seamless-continuity.png)
+
+Use it on every shot after the first. Use **Seamless chain** on a selected timeline
+range to enable it for several shots at once. A shot that has just generated its own Qwen
+still deliberately ignores it, so the picture you made is not overwritten.
 
 ---
 
