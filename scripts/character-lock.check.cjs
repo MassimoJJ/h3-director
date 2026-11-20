@@ -29,11 +29,12 @@ const check = (cond, m) => (cond ? pass(m) : fail(m));
   } catch { /* older tsx layout; the CLI shim handles it */ }
   fs.mkdirSync(TMP, { recursive: true });
 
-  let types, engine, qwen;
+  let types, engine, qwen, store;
   try {
     types = require(path.join(REPO, "backend", "src", "types.ts"));
     engine = require(path.join(REPO, "backend", "src", "engine.ts"));
     qwen = require(path.join(REPO, "backend", "src", "qwen.ts"));
+    store = require(path.join(REPO, "backend", "src", "store.ts"));
   } catch (e) {
     console.error("Could not load backend TypeScript: " + e.message);
     console.error("Run this through tsx:  npx tsx scripts/character-lock.check.cjs");
@@ -53,7 +54,7 @@ const check = (cond, m) => (cond ? pass(m) : fail(m));
     "audio/video tags are untouched by an image prepend",
   );
 
-  const identity = { name: "Maria", picture: 1, pictureShift: 2, startPicture: 2, startIsChain: true };
+  const identity = { name: "Maria", picture: 2, pictureShift: 2, startPicture: 1, startIsChain: true };
   const compiled = engine.compilePrompt(
     "r2v",
     "Maria turns. <Picture 1> follows her.",
@@ -61,9 +62,10 @@ const check = (cond, m) => (cond ? pass(m) : fail(m));
     "OLD GENERIC CONTINUATION",
     identity,
   );
-  check(compiled.includes("<Picture 3> follows her."), "director's picture tag follows the identity image");
-  check(compiled.includes("<Picture 1> is Maria."), "identity reference is named in the compiled prompt");
-  check(compiled.includes("<Picture 2> is the exact final frame"), "continuity reference is named in the compiled prompt");
+  check(compiled.includes("<Picture 3> follows her."), "director's picture tag follows the two prepended references");
+  check(compiled.includes("<Picture 2> is Maria."), "identity reference is named in the compiled prompt");
+  check(compiled.includes("<Picture 1> is the exact final frame"), "continuity reference is the FIRST picture");
+  check(compiled.includes("Do not copy its pose, framing, background or expression into the first frame"), "portrait is explicitly forbidden from becoming frame 0");
   check(!compiled.includes("OLD GENERIC CONTINUATION"), "generic continuation text is not stacked on an identity lock");
   const pinned = engine.compilePrompt("r2v", "Maria at the door.", 0, undefined, {
     ...identity, startIsChain: false,
@@ -81,13 +83,42 @@ const check = (cond, m) => (cond ? pass(m) : fail(m));
   const models = { fl2va: "none", ref2va: "ref.safetensors", textEncoder: "clip.safetensors", videoVae: "v.safetensors", audioVae: "a.safetensors" };
   const presence = { nodes: { LoadImage: true, MiniMaxH3EasyLoader: true, MiniMaxH3Easy: true, MiniMaxH3EasyOutput: true }, realismLora: null };
   const graph = engine.buildGraph(shot, models, {
-    imageRefs: [], refImages: ["identity.png", "seam.png"], refVideos: [], refAudios: [], keyframeRole: "first",
+    imageRefs: [], refImages: ["seam.png", "identity.png"], refVideos: [], refAudios: [], keyframeRole: "first",
   }, 1, presence, compiled);
   const p = graph.apiPrompt;
-  check(p.ref_img_0?.inputs?.image === "identity.png", "identity image is wired as the first picture reference");
-  check(p.ref_img_1?.inputs?.image === "seam.png", "seam frame is wired as the second picture reference");
+  check(p.ref_img_0?.inputs?.image === "seam.png", "continuity frame is wired as the FIRST picture reference");
+  check(p.ref_img_1?.inputs?.image === "identity.png", "identity portrait is wired as the second picture reference");
   check(p.easy?.inputs?.media_1?.[0] === "ref_img_0" && p.easy?.inputs?.media_2?.[0] === "ref_img_1", "reference order reaches the H3 node");
   check(p.easy?.inputs?.mode === "reference", "identity-locked shot uses H3 reference mode");
+
+  // The real ordering bug lived in planShot, not in buildGraph: the portrait used
+  // to be prepended before the seam frame, so H3 built frame 0 from the portrait.
+  const inputDir = path.join(TMP, "input");
+  fs.mkdirSync(inputDir, { recursive: true });
+  fs.mkdirSync(path.join(TMP, "library"), { recursive: true });
+  const portraitFile = path.join(TMP, "portrait-source.png");
+  const seamFile = path.join(TMP, "previous-last-frame.png");
+  fs.writeFileSync(portraitFile, "portrait bytes");
+  fs.writeFileSync(seamFile, "seam bytes");
+  const portrait = store.addAsset({ name: path.basename(portraitFile), absSrc: portraitFile, kind: "image", role: "character" });
+  const planned = await engine.planShot({
+    project: { id: "lockplan", shots: [] },
+    shot: { ...shot, id: "lockplan-shot", characterId: portrait.id, kind: "r2v", firstFrameId: null, continueFromPrev: true, prompt: "She looks around." },
+    models,
+    seed: 2,
+    comfyInputDir: inputDir,
+    comfy: {},
+    extraRefImageOverride: seamFile,
+    r2vContinuationText: undefined,
+  }, presence);
+  const q0 = planned.plan.apiPrompt.ref_img_0?.inputs?.image || "";
+  const q1 = planned.plan.apiPrompt.ref_img_1?.inputs?.image || "";
+  check(q0.includes("previous-last-frame"), "planShot puts the seam frame in <Picture 1>");
+  const portraitStem = path.basename(portrait.file, path.extname(portrait.file));
+  check(q1.includes(portraitStem) && q1 !== q0, "planShot puts the identity portrait in <Picture 2>");
+  check(planned.plan.compiledPrompt.includes("<Picture 2> is portrait-source."), "compiled prompt points identity at the second picture");
+  check(planned.plan.compiledPrompt.includes("<Picture 1> is the exact final frame"), "compiled prompt points the start at the first picture");
+  check(planned.plan.keyframes.first === seamFile, "seam frame is also a conformance keyframe, so frame 0 is overwritten exactly");
 
   const baseImage = {
     prompt: "Maria at the gallery", negativePrompt: "", width: 1024, height: 1024,

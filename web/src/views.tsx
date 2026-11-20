@@ -1717,9 +1717,10 @@ function ShotInspector({ shot }: { shot: Shot }) {
     ];
   }, [shot.imageIds, shot.videoIds, shot.audioIds]);
 
-  // The engine prepends the character (and, when present, the continuity frame
-  // and last frame) before the director's own reference images. Keep the tag
-  // picker honest about the index H3 will actually see.
+  // The engine prepends a continuity/start frame first when one is present, then the
+  // character portrait, then the last frame, before the director's own references.
+  // Keep the tag picker honest about the index H3 will actually see. The portrait is
+  // identity-only; <Picture 1> is the visual anchor H3 builds frame 0 from.
   const identityRefOffset = shot.characterId
     ? 1 + ((shot.continueFromPrev || shot.firstFrameId) ? 1 : 0) + (shot.lastFrameId ? 1 : 0)
     : 0;
@@ -1760,7 +1761,7 @@ function ShotInspector({ shot }: { shot: Shot }) {
 
       <Field
         label="Source character — identity lock"
-        hint="Attach one clear portrait. It is sent as <Picture 1> on every video and as a reference on every still, so the same person survives head turns, close-ups and shot changes. Attaching it switches stage 2 to Reference Video: H3's image mode only has room for first/last frames."
+        hint="Attach one clear portrait. It is sent to every video as an identity-only reference: <Picture 2> behind the seam/start frame when continuity is on (otherwise <Picture 1>), and as a reference on every still. The seam stays <Picture 1> and is written back as the exact first frame, so the next shot never jumps to the portrait. Attaching it switches stage 2 to Reference Video: H3's image mode only has room for first/last frames."
       >
         <div className="row" style={{ gap: 8 }}>
           <select
@@ -1822,7 +1823,7 @@ function ShotInspector({ shot }: { shot: Shot }) {
         </div>
       )}
 
-      {/* chaining — also valid in reference mode: the seam frame becomes <Picture 2> */}
+      {/* chaining — also valid in reference mode: the seam frame becomes <Picture 1> and is conformed as frame 0 */}
       <div className="row" style={{ alignItems: "center", gap: 8 }}>
         <input type="checkbox" checked={shot.continueFromPrev} onChange={(e) => up({ continueFromPrev: e.target.checked, ...(e.target.checked ? { firstFrameId: null } : {}) })} />
         <label style={{ margin: 0, textTransform: "none" }}>

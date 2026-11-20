@@ -100,7 +100,10 @@ exact keyframe, so a jump at frame 0 means the conform step failed - see the job
 The seam protects the first frame, not the identity. Bind a source portrait:
 **Library → Project character** (then **Apply to all**) or **Source character —
 identity lock** in the shot inspector. The lock attaches the portrait to Qwen stills and
-to H3 as `<Picture 1>`; the seam frame becomes `<Picture 2>`. If the timeline tile has no
+to H3 as an identity-only `<Picture 2>` behind the seam frame, which is `<Picture 1>`
+and is also written back as the exact first frame. If the shot has no seam or pinned
+first frame, the portrait becomes `<Picture 1>` and also anchors the shot. If the timeline
+tile has no
 🔒 badge, the shot has no lock. If an older shot shows a warning about image mode,
 re-select the character so the shot moves to `r2v` — image mode has no identity slot.
 Use a sharp, front-facing source image; identity guidance is probabilistic, not a hash.

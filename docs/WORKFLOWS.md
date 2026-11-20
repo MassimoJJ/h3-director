@@ -136,8 +136,10 @@ The **Library** tab holds characters, locations, motion clips and voices.
 - **Project character** chooses the cast inherited by new shots and boards. **Apply to
   all** binds it to the shots and boards that already exist.
 - On an `r2v` shot, use the reference panels to attach up to **9 images, 3 videos and
-  3 audio** files. The portrait locked as the source character occupies `<Picture 1>`;
-  these are the *other* references and are numbered after it. The `+` button either
+  3 audio** files. With continuity enabled, the seam frame is `<Picture 1>` and the
+  portrait locked as the source character is `<Picture 2>` (identity only); otherwise
+  the portrait is `<Picture 1>`. These are the *other* references and are numbered after
+  them. The `+` button either
   attaches the selected Library item or opens a file picker when nothing is selected.
 - You can also drag files from Explorer directly onto a shot tile.
 

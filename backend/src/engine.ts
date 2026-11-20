@@ -76,6 +76,13 @@ export function compilePrompt(
   if (identity) {
     parts.push(identityRuleForH3(identity.picture, identity.name));
     if (identity.startPicture) {
+      // H3 builds frame 0 from the FIRST picture in reference mode. The portrait
+      // is deliberately second, and this line stops the model from treating it
+      // as the shot's opening image.
+      parts.push(
+        `Use <Picture ${identity.picture}> for the person's identity only. ` +
+        "Do not copy its pose, framing, background or expression into the first frame of the video.",
+      );
       parts.push(identity.startIsChain
         ? `<Picture ${identity.startPicture}> is the exact final frame of the previous shot. Begin this shot from that image — same person, pose, wardrobe, framing and location.`
         : `<Picture ${identity.startPicture}> is this shot's starting image. Begin the shot from it — same person, pose, wardrobe, framing and location.`);
@@ -319,19 +326,30 @@ export async function planShot(ctx: RenderInputs, presence: NodePresence): Promi
 
   if (!imageMode) {
     if (character) {
-      refImageAbs.push(assetAbs(character.id)); // <Picture 1> — identity
       const chain = ctx.firstFrameOverride ?? ctx.extraRefImageOverride ?? null;
       const start = chain ?? (shot.firstFrameId ? assetAbs(shot.firstFrameId) : null);
-      if (start) refImageAbs.push(start); // <Picture 2> — continuity
-      if (shot.lastFrameId) refImageAbs.push(assetAbs(shot.lastFrameId)); // <Picture 3>
+      // ORDER MATTERS. In H3 reference mode <Picture 1> is the visual anchor and
+      // frame 0 is generated from it. The seam/start frame must lead; the source
+      // character follows and is described as identity-only in the prompt.
+      if (start) {
+        refImageAbs.push(start);
+        // Reference mode does not natively write keyframes back into the output.
+        // Mark the seam as a conformance keyframe so renderShot overwrites frame 0
+        // with the exact previous final frame, just as it does in image mode.
+        keyframeFirst = start;
+      }
+      refImageAbs.push(assetAbs(character.id));
+      const identityPicture = refImageAbs.length;
+      if (shot.lastFrameId) refImageAbs.push(assetAbs(shot.lastFrameId)); // last frame after identity
       identity = {
         name: path.basename(character.name, path.extname(character.name)),
-        picture: 1,
+        picture: identityPicture,
         pictureShift: refImageAbs.length,
-        ...(start ? { startPicture: 2, startIsChain: !!chain } : {}),
+        ...(start ? { startPicture: 1, startIsChain: !!chain } : {}),
       };
       warnings.push(
-        `Character lock: ${identity.name} is attached as <Picture 1> so every still and video in this shot keeps the same identity.`,
+        `Character lock: ${identity.name} is attached as <Picture ${identityPicture}> for identity only; ` +
+        `${start ? "<Picture 1> is the continuity start frame." : "There is no continuity frame, so the portrait is also the visual anchor."}`,
       );
     }
     for (const id of shot.imageIds) refImageAbs.push(assetAbs(id));

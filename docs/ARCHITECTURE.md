@@ -88,11 +88,15 @@ Key details:
   `<Video N>` and `<Audio N>` in reference mode; a voice hint is appended when audio is
   attached. The prompt optimizer inside the node pack is disabled so prompts are
   reproducible.
-- A **character lock** prepends the source portrait as `<Picture 1>` and, when present,
-  the seam/pinned frame as `<Picture 2>`. `shiftPictureTags()` renumbers any `<Picture N>`
-  the director already wrote before the prompt is submitted; the stored prompt is never
-  changed. The MiniMax H3 Easy node accepts only two images in image mode, so attaching a
-  character forces `r2v` (which permits nine).
+- A **character lock** orders the H3 references deliberately: the seam/pinned start
+  frame is `<Picture 1>` when one exists (H3 builds frame 0 from the first picture, and
+  the engine also conforms frame 0 to the exact seam), the source portrait follows as
+  `<Picture 2>` and is described in the prompt as identity-only, and an optional last
+  frame comes next. Without a start frame, the portrait is `<Picture 1>` and also acts
+  as the visual anchor. `shiftPictureTags()` renumbers any `<Picture N>` the director
+  already wrote before the prompt is submitted; the stored prompt is never changed. The
+  MiniMax H3 Easy node accepts only two images in image mode, so attaching a character
+  forces `r2v` (which permits nine).
 - Shot duration is clamped through one shared constant: `MIN_SHOT_SECONDS = 0.5`,
   `MAX_SHOT_SECONDS = 15`. The UI receives those limits from the backend so the drag
   handle cannot ask for a duration the engine will reject.
