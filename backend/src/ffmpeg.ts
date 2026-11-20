@@ -61,6 +61,24 @@ export async function extractLastFrame(videoAbs: string, outPng: string): Promis
   await run(FFMPEG, ["-y", "-sseof", "-0.05", "-i", videoAbs, "-frames:v", "1", "-update", "1", outPng], 180_000);
 }
 
+/** Extract a short clip ending at the last frame, for r2v continuity reference.
+ *
+ * The FULL previous clip is dangerous: if it began on a source portrait, H3 treats that
+ * portrait as the visual anchor and snaps back to it a fraction of a second into the new
+ * shot. A tail clip carries the camera/location near the cut without that opening image.
+ */
+export async function extractTailClip(videoAbs: string, outMp4: string, seconds = 1.5): Promise<void> {
+  await run(
+    FFMPEG,
+    [
+      "-y", "-sseof", `-${seconds}`, "-i", videoAbs,
+      "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+      "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", outMp4,
+    ],
+    180_000,
+  );
+}
+
 /** Extract the first video frame as a PNG thumbnail. */
 export async function extractFirstFrame(videoAbs: string, outPng: string): Promise<void> {
   await run(FFMPEG, ["-y", "-i", videoAbs, "-frames:v", "1", outPng], 180_000);

@@ -116,8 +116,8 @@ or "cut" can make it invent a new location while preserving the locked face. For
 identity-locked chained shot the engine now appends a location lock: keep `<Picture 1>`'s
 environment, lighting and camera position for the whole shot, do not use `<Picture 2>`'s
 background, and make no cut. Chained identity-locked shots also receive the previous
-shot's video as a `<Video N>` reference so the camera and location are conditioned across
-time. Remove conflicting camera directions from the shot prompt —
+shot's tail clip (the 1.5s ending on the seam) as a `<Video N>` reference so the camera
+and location are conditioned across time without reintroducing the source portrait. Remove conflicting camera directions from the shot prompt —
 describe only the actor's expression and head movement. If you want a visible camera move,
 turn the character lock off or accept that the location may change.
 

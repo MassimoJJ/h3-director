@@ -4,7 +4,7 @@ import path from "node:path";
 import { ComfyClient } from "./comfy";
 import { nodePresence, renderShot, resolveEngineModels } from "./engine";
 import { renderImage } from "./qwen";
-import { concatVideos, extractLastFrame, probeVideo } from "./ffmpeg";
+import { concatVideos, extractLastFrame, extractTailClip, probeVideo } from "./ffmpeg";
 import { cacheDir, exportsDir, getProject, saveProject, upsertExportJob, upsertRenderJob, acceptedTakeOf, addAsset, getAsset, appendShotTake, appendStillTake, mutateShotOnDisk } from "./store";
 import { DATA_DIR, appendJobLog } from "./settings";
 import type { AppSettings, ExportJob, ImageBoard, ImageJob, ImageTake, LibraryAsset, Project, RenderJob, Shot, ShotStill, Take } from "./types";
@@ -222,9 +222,26 @@ export class Director {
         if (wantsChain && !frame) frame = await prevShotFrame(shot);
         const wantChain = wantsChain && frame != null;
         const isRefKind = shot.kind === "r2v";
-        // The seam PNG pins frame 0; the source clip also gives H3 the camera/location
-        // over time. Without it, a chained r2v shot can drift into a new room.
-        const chainVideo = wantChain && isRefKind ? chainSrcVideoAbs : null;
+        // The seam PNG pins frame 0; a TAIL clip of the source video gives H3 the
+        // camera/location over time. Never pass the full clip: its opening image may
+        // be the source portrait, which would make H3 snap back to it after frame 0.
+        let chainVideo: string | null = null;
+        if (wantChain && isRefKind && chainSrcVideoAbs) {
+          const tail = path.join(
+            cacheDir(),
+            `${path.basename(chainSrcVideoAbs, path.extname(chainSrcVideoAbs))}_tail.mp4`,
+          );
+          try {
+            if (!fs.existsSync(tail)) await extractTailClip(chainSrcVideoAbs, tail);
+            chainVideo = tail;
+          } catch (e) {
+            this.emit("log", projectId, job.id, {
+              level: "warn",
+              message: `[${shot.name}] Could not build a continuity tail clip; rendering without the video reference.`,
+              error: e instanceof Error ? e.message : String(e),
+            });
+          }
+        }
         const result = await renderShot({
           project,
           shot,

@@ -78,9 +78,10 @@ directory. It verifies that prepending the identity image renumbers existing
 `<Picture N>` tags without touching `<Video N>` / `<Audio N>`, that the H3 graph wires
 the seam frame first, the portrait second and the seam as a frame-0 conformance keyframe,
 that the compiled prompt pins the seam environment for the whole shot and rejects the
-portrait background, that a chained shot attaches the previous clip as a continuity video
-reference, and that Qwen's `t2i` path keeps an empty latent while `i2i` samples from the
-encoder latent built on the source image.
+portrait background, that a chained shot attaches a continuity video reference, and that
+Qwen's `t2i` path keeps an empty latent while `i2i` samples from the encoder latent built
+on the source image. The actual tail extraction is exercised by a real chained render,
+not by this pure-function harness.
 
 ---
 

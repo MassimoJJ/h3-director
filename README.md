@@ -254,14 +254,15 @@ last frame), so identity can only be conditioned in reference mode.
 | --- | --- |
 | Qwen text → image | The portrait is reference image 1, but sampling keeps your chosen empty latent — the portrait guides identity, not the canvas size. |
 | Qwen image → image | The image being edited stays first so its framing survives; the portrait follows it as a reference. |
-| H3 video | With continuity on, the seam/start frame is `<Picture 1>` and is also conformed as the exact first frame; the source character is `<Picture 2>` and is described as identity-only so H3 does not copy its pose or background. The compiled prompt also locks the seam's environment, lighting and camera position for the whole shot and forbids the portrait's background, and the previous shot's video is attached as a `<Video N>` reference so camera/location are conditioned over time. Without a seam, the portrait is `<Picture 1>`. An optional last frame comes next, then your other references. Existing `<Picture N>` tags in the prompt are renumbered automatically; `<Video N>` and `<Audio N>` are unchanged. |
+| H3 video | With continuity on, the seam/start frame is `<Picture 1>` and is also conformed as the exact first frame; the source character is `<Picture 2>` and is described as identity-only so H3 does not copy its pose or background. The compiled prompt also locks the seam's environment, lighting and camera position for the whole shot and forbids the portrait's background, and the previous shot's tail clip (ending on the seam) is attached as a `<Video N>` reference so camera/location are conditioned near the cut without reintroducing the source portrait. Without a seam, the portrait is `<Picture 1>`. An optional last frame comes next, then your other references. Existing `<Picture N>` tags in the prompt are renumbered automatically; `<Video N>` and `<Audio N>` are unchanged. |
 
 The compiled prompt names the identity reference explicitly and tells H3 to keep the
 same face, hair, age, skin tone and build, while forbidding the portrait's pose, framing,
 background and expression from becoming the first frame. The seam frame is named as the
 true start of the shot, and its location, lighting and camera position are locked for the
-entire take. A chained shot also receives the previous clip as `<Video N>` so H3 can follow
-the same camera and environment over time. Voice references continue to work through `<Audio N>`.
+entire take. A chained shot also receives the previous clip's last 1.5 seconds as
+`<Video N>` so H3 can follow the same camera and environment without copying the
+portrait that may appear at the start of that clip. Voice references continue to work through `<Audio N>`.
 
 **Limits.** Identity conditioning is probabilistic, not a fingerprint lock: use a
 sharp, well-lit portrait and avoid extreme angles in the source. One portrait locks one

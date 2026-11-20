@@ -14,9 +14,10 @@ All notable changes are listed here. The format follows
 - Added an automatic location/camera lock for identity-locked chained shots: the compiled
   prompt now pins the seam frame's environment, lighting and camera position for the
   entire shot and forbids the portrait's background, so the scene cannot change mid-shot.
-- Chained `r2v` shots now also receive the previous shot's video as a `<Video N>`
-  reference, so H3 conditions on the camera and location over time, not only on one
-  start frame. One of the three video slots is reserved for that continuity clip.
+- Chained `r2v` shots now also receive a 1.5s tail clip of the previous shot as a
+  `<Video N>` reference, so H3 conditions on the camera and location near the cut — not on
+  the full clip, whose opening image may be the source portrait and cause a snap-back.
+  One of the three video slots is reserved for that continuity clip.
 
 ### Added
 

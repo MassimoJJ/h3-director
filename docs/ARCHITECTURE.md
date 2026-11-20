@@ -95,9 +95,10 @@ Key details:
   frame comes next. The compiled prompt also locks the seam frame's environment, lighting
   and camera position for the **entire** shot and forbids the portrait's background, which
   stops H3 from generating a new room when the director's prompt mentions camera movement.
-  A chained `r2v` shot also stages the previous shot's video as an extra `<Video N>`
-  reference (one of the three video slots is reserved for it), so the camera and location
-  are conditioned across time. Without a start frame, the portrait is `<Picture 1>` and also acts
+  A chained `r2v` shot also stages a short **tail clip** of the previous shot (ending on
+  the seam frame) as an extra `<Video N>` reference. The full clip is never used: its
+  opening frame may be the source portrait, which H3 would copy a fraction of a second
+  into the new shot. One of the three video slots is reserved for the tail. Without a start frame, the portrait is `<Picture 1>` and also acts
   as the visual anchor. `shiftPictureTags()` renumbers any `<Picture N>` the director
   already wrote before the prompt is submitted; the stored prompt is never changed. The
   MiniMax H3 Easy node accepts only two images in image mode, so attaching a character
