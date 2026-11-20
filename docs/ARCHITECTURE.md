@@ -92,7 +92,12 @@ Key details:
   frame is `<Picture 1>` when one exists (H3 builds frame 0 from the first picture, and
   the engine also conforms frame 0 to the exact seam), the source portrait follows as
   `<Picture 2>` and is described in the prompt as identity-only, and an optional last
-  frame comes next. Without a start frame, the portrait is `<Picture 1>` and also acts
+  frame comes next. The compiled prompt also locks the seam frame's environment, lighting
+  and camera position for the **entire** shot and forbids the portrait's background, which
+  stops H3 from generating a new room when the director's prompt mentions camera movement.
+  A chained `r2v` shot also stages the previous shot's video as an extra `<Video N>`
+  reference (one of the three video slots is reserved for it), so the camera and location
+  are conditioned across time. Without a start frame, the portrait is `<Picture 1>` and also acts
   as the visual anchor. `shiftPictureTags()` renumbers any `<Picture N>` the director
   already wrote before the prompt is submitted; the stored prompt is never changed. The
   MiniMax H3 Easy node accepts only two images in image mode, so attaching a character

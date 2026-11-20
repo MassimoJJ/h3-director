@@ -108,6 +108,19 @@ tile has no
 re-select the character so the shot moves to `r2v` — image mode has no identity slot.
 Use a sharp, front-facing source image; identity guidance is probabilistic, not a hash.
 
+### The background or camera angle changes halfway through the shot
+
+The seam is exact only at frame 0. In reference mode H3 keeps conditioning on all
+pictures for the rest of the clip, so words like "camera following", "tracking", "zoom"
+or "cut" can make it invent a new location while preserving the locked face. For an
+identity-locked chained shot the engine now appends a location lock: keep `<Picture 1>`'s
+environment, lighting and camera position for the whole shot, do not use `<Picture 2>`'s
+background, and make no cut. Chained identity-locked shots also receive the previous
+shot's video as a `<Video N>` reference so the camera and location are conditioned across
+time. Remove conflicting camera directions from the shot prompt —
+describe only the actor's expression and head movement. If you want a visible camera move,
+turn the character lock off or accept that the location may change.
+
 ### Export used an old take
 
 Fixed in the current code: export uses the newest accepted take via `acceptedTakeOf`.

@@ -46,6 +46,7 @@ export interface RenderInputs {
   firstFrameOverride?: string | null; // abs path to a PNG (chaining) staged into input
   lastFrameOverride?: string | null;
   extraRefImageOverride?: string | null; // abs path (r2v continuity reference)
+  refVideoOverride?: string | null; // abs path to previous shot's video (r2v motion/location reference)
   extraWarnings?: string[];
   r2vContinuationText?: string;
 }
@@ -64,7 +65,7 @@ export function compilePrompt(
   prompt: string,
   audioCount: number,
   r2vContinuationText: string | undefined,
-  identity?: { name: string; picture: number; pictureShift: number; startPicture?: number; startIsChain?: boolean },
+  identity?: { name: string; picture: number; pictureShift: number; startPicture?: number; startIsChain?: boolean; video?: number },
 ): string {
   // Identity images are PREPENDED, so every <Picture N> the director wrote has
   // to be renumbered before it reaches H3. The stored prompt is never mutated.
@@ -86,6 +87,18 @@ export function compilePrompt(
       parts.push(identity.startIsChain
         ? `<Picture ${identity.startPicture}> is the exact final frame of the previous shot. Begin this shot from that image — same person, pose, wardrobe, framing and location.`
         : `<Picture ${identity.startPicture}> is this shot's starting image. Begin the shot from it — same person, pose, wardrobe, framing and location.`);
+      // Reference mode conditions on images but does not hold frame 0's environment
+      // for the rest of the clip. Without this, a camera-direction in the director's
+      // prompt lets H3 invent a new room/angle while keeping the locked face.
+      const motionRef = identity.video
+        ? ` Match the camera motion, speed and environment from <Video ${identity.video}> as well.`
+        : "";
+      parts.push(
+        `Keep the environment from <Picture ${identity.startPicture}> for the ENTIRE shot: ` +
+        "same location, same background geometry, same lighting and same camera position. " +
+        "This is one continuous take in one place — no cut, no new camera angle, no different room. " +
+        `Do not use the background from <Picture ${identity.picture}>.${motionRef}`,
+      );
     }
   } else if (kind === "r2v" && r2vContinuationText) {
     parts.push(r2vContinuationText);
@@ -316,7 +329,7 @@ export async function planShot(ctx: RenderInputs, presence: NodePresence): Promi
   const refImageAbs: string[] = [];
   const refVideoAbs: string[] = [];
   const refAudioAbs: string[] = [];
-  let identity: { name: string; picture: number; pictureShift: number; startPicture?: number; startIsChain?: boolean } | undefined;
+  let identity: { name: string; picture: number; pictureShift: number; startPicture?: number; startIsChain?: boolean; video?: number } | undefined;
 
   // Resolve the identity lock BEFORE the media caps: the character image is the
   // one attachment the room refuses to drop, even on a crowded reference shot.
@@ -356,7 +369,22 @@ export async function planShot(ctx: RenderInputs, presence: NodePresence): Promi
     if (ctx.extraRefImageOverride && !refImageAbs.includes(ctx.extraRefImageOverride)) {
       refImageAbs.push(ctx.extraRefImageOverride);
     }
-    for (const id of shot.videoIds) refVideoAbs.push(assetAbs(id));
+    // Reserve one video slot for the previous shot's clip, so H3 can condition on
+    // the camera/location over time instead of only copying a single start frame.
+    const maxUserVideos = ctx.refVideoOverride ? Math.max(0, VIDEO_MAX - 1) : VIDEO_MAX;
+    if (shot.videoIds.length > maxUserVideos) {
+      warnings.push(`Only ${maxUserVideos} of your ${shot.videoIds.length} reference videos fit alongside the continuity clip; extras dropped.`);
+    }
+    for (const id of shot.videoIds.slice(0, maxUserVideos)) refVideoAbs.push(assetAbs(id));
+    if (ctx.refVideoOverride) {
+      let videoIndex = refVideoAbs.indexOf(ctx.refVideoOverride);
+      if (videoIndex < 0) {
+        refVideoAbs.push(ctx.refVideoOverride);
+        videoIndex = refVideoAbs.length - 1;
+      }
+      if (identity) identity.video = videoIndex + 1;
+      warnings.push(`Continuity video attached as <Video ${videoIndex + 1}> so the camera and location carry across the cut.`);
+    }
     for (const id of shot.audioIds) refAudioAbs.push(assetAbs(id));
   } else if (character) {
     warnings.push(

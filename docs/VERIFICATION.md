@@ -77,8 +77,10 @@ Runs `scripts/character-lock.check.cjs` through `tsx` against a temporary data
 directory. It verifies that prepending the identity image renumbers existing
 `<Picture N>` tags without touching `<Video N>` / `<Audio N>`, that the H3 graph wires
 the seam frame first, the portrait second and the seam as a frame-0 conformance keyframe,
-and that Qwen's `t2i` path keeps an empty latent while `i2i` samples from the encoder
-latent built on the source image.
+that the compiled prompt pins the seam environment for the whole shot and rejects the
+portrait background, that a chained shot attaches the previous clip as a continuity video
+reference, and that Qwen's `t2i` path keeps an empty latent while `i2i` samples from the
+encoder latent built on the source image.
 
 ---
 

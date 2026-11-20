@@ -11,6 +11,12 @@ All notable changes are listed here. The format follows
   portrait `<Picture 2>` with an explicit identity-only prompt rule, so a chained shot no
   longer jumps to the portrait at frame 0. The seam frame is also conformed as an exact
   frame-0 keyframe in reference mode.
+- Added an automatic location/camera lock for identity-locked chained shots: the compiled
+  prompt now pins the seam frame's environment, lighting and camera position for the
+  entire shot and forbids the portrait's background, so the scene cannot change mid-shot.
+- Chained `r2v` shots now also receive the previous shot's video as a `<Video N>`
+  reference, so H3 conditions on the camera and location over time, not only on one
+  start frame. One of the three video slots is reserved for that continuity clip.
 
 ### Added
 

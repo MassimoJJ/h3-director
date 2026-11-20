@@ -1830,6 +1830,11 @@ function ShotInspector({ shot }: { shot: Shot }) {
           Continue from previous shot’s final frame (seamless){shot.kind === "r2v" ? " — attached as a reference image" : ""}
         </label>
       </div>
+      {shot.continueFromPrev && shot.characterId && (
+        <div className="muted small">
+          The seam's location and camera are locked for the whole shot. Remove "camera follows", "zoom" or "cut" from the prompt, or H3 may generate a new scene.
+        </div>
+      )}
 
       {/* reference media for r2v */}
       {shot.kind === "r2v" && (

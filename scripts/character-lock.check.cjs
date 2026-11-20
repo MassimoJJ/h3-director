@@ -66,6 +66,9 @@ const check = (cond, m) => (cond ? pass(m) : fail(m));
   check(compiled.includes("<Picture 2> is Maria."), "identity reference is named in the compiled prompt");
   check(compiled.includes("<Picture 1> is the exact final frame"), "continuity reference is the FIRST picture");
   check(compiled.includes("Do not copy its pose, framing, background or expression into the first frame"), "portrait is explicitly forbidden from becoming frame 0");
+  check(compiled.includes("Keep the environment from <Picture 1> for the ENTIRE shot"), "seam location is locked for the whole shot, not just frame 0");
+  check(compiled.includes("no cut, no new camera angle, no different room"), "camera/background drift is explicitly forbidden");
+  check(compiled.includes("Do not use the background from <Picture 2>"), "portrait background cannot replace the seam location");
   check(!compiled.includes("OLD GENERIC CONTINUATION"), "generic continuation text is not stacked on an identity lock");
   const pinned = engine.compilePrompt("r2v", "Maria at the door.", 0, undefined, {
     ...identity, startIsChain: false,
@@ -81,7 +84,7 @@ const check = (cond, m) => (cond ? pass(m) : fail(m));
     spectrum: false, takes: [],
   };
   const models = { fl2va: "none", ref2va: "ref.safetensors", textEncoder: "clip.safetensors", videoVae: "v.safetensors", audioVae: "a.safetensors" };
-  const presence = { nodes: { LoadImage: true, MiniMaxH3EasyLoader: true, MiniMaxH3Easy: true, MiniMaxH3EasyOutput: true }, realismLora: null };
+  const presence = { nodes: { LoadImage: true, VHS_LoadVideo: true, MiniMaxH3EasyLoader: true, MiniMaxH3Easy: true, MiniMaxH3EasyOutput: true }, realismLora: null };
   const graph = engine.buildGraph(shot, models, {
     imageRefs: [], refImages: ["seam.png", "identity.png"], refVideos: [], refAudios: [], keyframeRole: "first",
   }, 1, presence, compiled);
@@ -98,8 +101,10 @@ const check = (cond, m) => (cond ? pass(m) : fail(m));
   fs.mkdirSync(path.join(TMP, "library"), { recursive: true });
   const portraitFile = path.join(TMP, "portrait-source.png");
   const seamFile = path.join(TMP, "previous-last-frame.png");
+  const prevVideoFile = path.join(TMP, "previous-shot.mp4");
   fs.writeFileSync(portraitFile, "portrait bytes");
   fs.writeFileSync(seamFile, "seam bytes");
+  fs.writeFileSync(prevVideoFile, "video bytes");
   const portrait = store.addAsset({ name: path.basename(portraitFile), absSrc: portraitFile, kind: "image", role: "character" });
   const planned = await engine.planShot({
     project: { id: "lockplan", shots: [] },
@@ -109,6 +114,7 @@ const check = (cond, m) => (cond ? pass(m) : fail(m));
     comfyInputDir: inputDir,
     comfy: {},
     extraRefImageOverride: seamFile,
+    refVideoOverride: prevVideoFile,
     r2vContinuationText: undefined,
   }, presence);
   const q0 = planned.plan.apiPrompt.ref_img_0?.inputs?.image || "";
@@ -119,6 +125,10 @@ const check = (cond, m) => (cond ? pass(m) : fail(m));
   check(planned.plan.compiledPrompt.includes("<Picture 2> is portrait-source."), "compiled prompt points identity at the second picture");
   check(planned.plan.compiledPrompt.includes("<Picture 1> is the exact final frame"), "compiled prompt points the start at the first picture");
   check(planned.plan.keyframes.first === seamFile, "seam frame is also a conformance keyframe, so frame 0 is overwritten exactly");
+  const v0 = planned.plan.apiPrompt.ref_vid_0?.inputs?.video || "";
+  check(v0.includes("previous-shot"), "previous shot's video is attached as a continuity reference");
+  check(planned.plan.apiPrompt.easy?.inputs?.media_3?.[0] === "ref_vid_0", "continuity video reaches the H3 node");
+  check(planned.plan.compiledPrompt.includes("Match the camera motion, speed and environment from <Video 1>"), "compiled prompt uses the continuity video for camera/location");
 
   const baseImage = {
     prompt: "Maria at the gallery", negativePrompt: "", width: 1024, height: 1024,

@@ -139,7 +139,11 @@ The **Library** tab holds characters, locations, motion clips and voices.
   3 audio** files. With continuity enabled, the seam frame is `<Picture 1>` and the
   portrait locked as the source character is `<Picture 2>` (identity only); otherwise
   the portrait is `<Picture 1>`. These are the *other* references and are numbered after
-  them. The `+` button either
+  them. With a chained seam, the engine also locks the location and camera for the whole
+  shot in the compiled prompt and attaches the previous shot's video as a `<Video N>`
+  reference; one of your three video slots is reserved for it. Avoid "camera follows",
+  "zoom" or "cut" in the shot prompt, or H3 will overwrite the location lock with a
+  newly generated scene. The `+` button either
   attaches the selected Library item or opens a file picker when nothing is selected.
 - You can also drag files from Explorer directly onto a shot tile.
 

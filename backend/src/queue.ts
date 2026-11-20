@@ -222,6 +222,9 @@ export class Director {
         if (wantsChain && !frame) frame = await prevShotFrame(shot);
         const wantChain = wantsChain && frame != null;
         const isRefKind = shot.kind === "r2v";
+        // The seam PNG pins frame 0; the source clip also gives H3 the camera/location
+        // over time. Without it, a chained r2v shot can drift into a new room.
+        const chainVideo = wantChain && isRefKind ? chainSrcVideoAbs : null;
         const result = await renderShot({
           project,
           shot,
@@ -232,6 +235,7 @@ export class Director {
           timeoutMs: settings.renderTimeoutMin * 60_000,
           firstFrameOverride: wantChain && !isRefKind ? frame : null,
           extraRefImageOverride: wantChain && isRefKind ? frame : null,
+          refVideoOverride: chainVideo,
           extraWarnings:
             wantsChain && !frame && project.shots.findIndex((s) => s.id === shot.id) > 0
               ? ["Continue-from-previous was requested, but the previous shot has no finished take to chain from — rendered as a fresh video."]
