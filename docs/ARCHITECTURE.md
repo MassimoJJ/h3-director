@@ -88,6 +88,11 @@ Key details:
   `<Video N>` and `<Audio N>` in reference mode; a voice hint is appended when audio is
   attached. The prompt optimizer inside the node pack is disabled so prompts are
   reproducible.
+- A **character lock** prepends the source portrait as `<Picture 1>` and, when present,
+  the seam/pinned frame as `<Picture 2>`. `shiftPictureTags()` renumbers any `<Picture N>`
+  the director already wrote before the prompt is submitted; the stored prompt is never
+  changed. The MiniMax H3 Easy node accepts only two images in image mode, so attaching a
+  character forces `r2v` (which permits nine).
 - Shot duration is clamped through one shared constant: `MIN_SHOT_SECONDS = 0.5`,
   `MAX_SHOT_SECONDS = 15`. The UI receives those limits from the backend so the drag
   handle cannot ask for a duration the engine will reject.
@@ -111,7 +116,7 @@ UNETLoader (qwen_image_2.1)
 CLIPLoader (qwen3vl_8b)
 VAELoader  (qwen_image_2.1_vae)
         |
-TextEncodeQwenImage21  <- prompt, plus reference images for i2i
+TextEncodeQwenImage21  <- prompt, plus reference images (identity + edit sources)
         |
 optional QwenImage21Cache (device/dtype configurable per board or shot)
         |
@@ -120,9 +125,15 @@ optional QwenImage21Cache (device/dtype configurable per board or shot)
 
 - Canvas dimensions are snapped to multiples of 16, which the Qwen VAE requires.
 - `t2i` writes a picture from the prompt; an empty still prompt falls back to the
-  shot's own prompt.
+  shot's own prompt. A character-locked portrait is added as reference 1, but the KSampler
+  still uses `EmptyLatentImage` — identity follows the conditioning, the canvas stays the
+  director's choice.
 - `i2i` (called `edit` in the data model) uses Library images as references. With no
-  references it degrades to text-to-image and records a warning.
+  references it degrades to text-to-image and records a warning. The image being edited
+  stays first so the encoder's latent keeps its framing; a locked character is appended
+  after it and named by its reference number in the compiled prompt.
+- Boards created in the Stills tab carry their own `characterId`; shot still stages
+  inherit the shot's lock.
 - Variants 1-4 are supported. Seeds can be random per take or fixed for A/B testing.
 - Rendering a still appends a take, promotes the chosen one to the Library and points
   the shot at it as its first frame. A `t2v` shot flips to `i2v` at that point.

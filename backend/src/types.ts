@@ -25,6 +25,28 @@ export function clampShotSeconds(sec: number): number {
 }
 
 /**
+ * Identity conditioning is a shared concern of both model stages. Keeping the
+ * wording here means the still stage and the video stage cannot drift apart.
+ */
+export function identityRuleForH3(picture: number, name: string): string {
+  return `<Picture ${picture}> is ${name}. This is the same person in every shot: preserve their face, hair, age, skin tone and build exactly. Do not change their identity.`;
+}
+
+export function identityRuleForQwen(reference: number, name: string): string {
+  return `Reference image ${reference} shows ${name}. Keep the same face, hair, age, skin tone and build in every generated still; do not change the person's identity.`;
+}
+
+/**
+ * Prepending character/continuity images shifts H3's canonical <Picture N>
+ * indices. Existing prompt tags are rewritten instead of silently pointing at
+ * the wrong attachment.
+ */
+export function shiftPictureTags(text: string, offset: number): string {
+  if (!offset) return text;
+  return text.replace(/<Picture\s+(\d+)\s*>/gi, (_all, n: string) => `<Picture ${Number(n) + offset}>`);
+}
+
+/**
  * Make one take of a shot the accepted one, clearing the flag on the rest.
  *
  * Kept beside the clamp helpers because it is pure data logic that both the API
@@ -107,6 +129,8 @@ export interface ImageBoard {
   negativePrompt: string;
   /** Library asset ids used as reference images (edit mode). */
   imageIds: string[];
+  /** Library image asset whose identity is locked across every still from this board. */
+  characterId?: string | null;
   width: number;
   height: number;
   steps: number;
@@ -164,6 +188,8 @@ export interface ShotStill {
   negativePrompt: string;
   /** Library assets used as references (i2i only). */
   imageIds: string[];
+  /** Identity lock inherited from the shot when this stage renders. */
+  characterId?: string | null;
   width: number;
   height: number;
   steps: number;
@@ -193,6 +219,8 @@ export interface Shot {
   imageIds: string[]; // asset ids
   videoIds: string[];
   audioIds: string[];
+  /** Library image asset whose identity must survive every still and every video in this shot. */
+  characterId?: string | null;
   // image-mode keyframes (i2v / fl2v / t2v)
   firstFrameId: string | null; // library asset id, or null when chained from previous shot
   lastFrameId: string | null;
@@ -239,6 +267,8 @@ export interface Project {
   modelTextEncoder: string | null;
   defaults: ProjectDefaults;
   shots: Shot[];
+  /** Character inherited by new shots and still boards; the cast of the film. */
+  defaultCharacterId?: string | null;
   /** Qwen Image 2.1 stills (t2i / edit). Optional so pre-existing project files load. */
   boards?: ImageBoard[];
 }

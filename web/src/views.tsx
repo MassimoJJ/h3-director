@@ -1169,7 +1169,10 @@ function TimelineTile({ shot, index, width, thumbH, assets, selected, dragging, 
   const maxSec = uiCtx.settings?.limits?.maxShotSeconds ?? TIMELINE_MAX_SEC;
   const lastOk = [...shot.takes].reverse().find((t) => t.status === "ok");
   const firstFrame = shot.firstFrameId ? assets.find((a) => a.id === shot.firstFrameId) : undefined;
-  const refImage = shot.kind === "r2v" && shot.imageIds[0] ? assets.find((a) => a.id === shot.imageIds[0]) : undefined;
+  const characterAsset = shot.characterId ? assets.find((a) => a.id === shot.characterId) : undefined;
+  const refImage = shot.kind === "r2v"
+    ? (characterAsset ?? (shot.imageIds[0] ? assets.find((a) => a.id === shot.imageIds[0]) : undefined))
+    : undefined;
 
   // Resolve still take thumbnail if available
   const stillTakes = shot.still?.takes ?? [];
@@ -1310,6 +1313,9 @@ function TimelineTile({ shot, index, width, thumbH, assets, selected, dragging, 
           other or with the duration handle at narrow widths. */}
       <div className="tl-head">
         {shot.continueFromPrev && <span className="tl-chain" title="Continues from the previous shot's final frame">🔗</span>}
+        {characterAsset && (
+          <span className="tl-chain" title={`Identity locked to ${characterAsset.name}`}>🔒</span>
+        )}
 
         {onSetStillMode && (compact ? (
           <button
@@ -1711,6 +1717,13 @@ function ShotInspector({ shot }: { shot: Shot }) {
     ];
   }, [shot.imageIds, shot.videoIds, shot.audioIds]);
 
+  // The engine prepends the character (and, when present, the continuity frame
+  // and last frame) before the director's own reference images. Keep the tag
+  // picker honest about the index H3 will actually see.
+  const identityRefOffset = shot.characterId
+    ? 1 + ((shot.continueFromPrev || shot.firstFrameId) ? 1 : 0) + (shot.lastFrameId ? 1 : 0)
+    : 0;
+
   return (
     <div className="panel" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div className="row" style={{ justifyContent: "space-between" }}>
@@ -1745,6 +1758,52 @@ function ShotInspector({ shot }: { shot: Shot }) {
         </div>
       </Field>
 
+      <Field
+        label="Source character — identity lock"
+        hint="Attach one clear portrait. It is sent as <Picture 1> on every video and as a reference on every still, so the same person survives head turns, close-ups and shot changes. Attaching it switches stage 2 to Reference Video: H3's image mode only has room for first/last frames."
+      >
+        <div className="row" style={{ gap: 8 }}>
+          <select
+            className="grow"
+            value={shot.characterId ?? ""}
+            onChange={(e) => {
+              const id = e.target.value || null;
+              void api.setShotCharacter(p.id, shot.id, id).then((updated) => {
+                ui.mutateShot(shot.id, { characterId: updated.characterId, kind: updated.kind });
+                ui.toast(id ? "Source character locked to this shot" : "Character lock removed");
+                void ui.refreshAll();
+              }).catch((e: unknown) => ui.toast((e as Error).message, "err"));
+            }}
+          >
+            <option value="">None — no identity lock</option>
+            {[...imageAssets]
+              .sort((a, b) => Number(b.role === "character") - Number(a.role === "character"))
+              .map((a) => (
+                <option key={a.id} value={a.id}>{a.role === "character" ? "★ " : ""}{a.name}</option>
+              ))}
+          </select>
+          {shot.characterId && (
+            <button
+              className="small"
+              title="Use this character on every shot and still board in the project"
+              onClick={() => {
+                void api.setProjectCharacter(p.id, shot.characterId ?? null, true).then((r) => {
+                  void ui.refreshAll();
+                  ui.toast(`Identity locked on ${r.touched.length} shot(s)`);
+                }).catch((e: unknown) => ui.toast((e as Error).message, "err"));
+              }}
+            >
+              Apply to all
+            </button>
+          )}
+        </div>
+        {shot.characterId && shot.kind !== "r2v" && (
+          <div className="err small" style={{ marginTop: 4 }}>
+            This older shot is still in image mode. Re-select the character above to move it to reference mode; until then H3 cannot see the identity image.
+          </div>
+        )}
+      </Field>
+
       {/* the still stage itself, only when enabled */}
       {stillMode !== "none" && (
         <StillStage shot={shot} imageAssets={imageAssets} />
@@ -1763,20 +1822,21 @@ function ShotInspector({ shot }: { shot: Shot }) {
         </div>
       )}
 
-      {/* chaining */}
+      {/* chaining — also valid in reference mode: the seam frame becomes <Picture 2> */}
       <div className="row" style={{ alignItems: "center", gap: 8 }}>
-        <input type="checkbox" checked={shot.continueFromPrev} onChange={(e) => up({ continueFromPrev: e.target.checked, ...(e.target.checked ? { firstFrameId: null } : {}) })}
-          disabled={shot.kind === "r2v"} />
-        <label style={{ margin: 0, textTransform: "none" }}>Continue from previous shot’s final frame (seamless)</label>
+        <input type="checkbox" checked={shot.continueFromPrev} onChange={(e) => up({ continueFromPrev: e.target.checked, ...(e.target.checked ? { firstFrameId: null } : {}) })} />
+        <label style={{ margin: 0, textTransform: "none" }}>
+          Continue from previous shot’s final frame (seamless){shot.kind === "r2v" ? " — attached as a reference image" : ""}
+        </label>
       </div>
 
       {/* reference media for r2v */}
       {shot.kind === "r2v" && (
         <>
           <div className="grid" style={{ gridTemplateColumns: "1fr" }}>
-            <MultiPicker title="Reference images (character / location / style)" kind="image" ids={shot.imageIds} assets={imageAssets} max={REF_IMAGE_MAX}
+            <MultiPicker title="Other reference images (location / style / prop)" kind="image" ids={shot.imageIds} assets={imageAssets} max={REF_IMAGE_MAX}
               onToggle={(id) => up({ imageIds: toggle(shot.imageIds, id) })}
-              onAttach={(ids) => up({ imageIds: mergeRefs(shot.imageIds, ids, REF_IMAGE_MAX) })} tagOf={(i) => `<Picture ${i + 1}>`} />
+              onAttach={(ids) => up({ imageIds: mergeRefs(shot.imageIds, ids, REF_IMAGE_MAX) })} tagOf={(i) => `<Picture ${identityRefOffset + i + 1}>`} />
             <MultiPicker title="Reference videos (motion / edit)" kind="video" ids={shot.videoIds} assets={videoAssets} max={REF_VIDEO_MAX}
               onToggle={(id) => up({ videoIds: toggle(shot.videoIds, id) })}
               onAttach={(ids) => up({ videoIds: mergeRefs(shot.videoIds, ids, REF_VIDEO_MAX) })} tagOf={(i) => `<Video ${i + 1}>`} />
@@ -1789,7 +1849,7 @@ function ShotInspector({ shot }: { shot: Shot }) {
             <Field label="Insert reference tags into the prompt">
               <div className="row" style={{ flexWrap: "wrap" }}>
                 {r2vTags.map((t) => {
-                  const tag = t.kind === "image" ? `<Picture ${t.n}>` : t.kind === "video" ? `<Video ${t.n}>` : `<Audio ${t.n}>`;
+                  const tag = t.kind === "image" ? `<Picture ${t.n + identityRefOffset}>` : t.kind === "video" ? `<Video ${t.n}>` : `<Audio ${t.n}>`;
                   return (
                     <button key={tag} className="small chip kind" style={{ cursor: "pointer" }}
                       onClick={() => up({ prompt: `${shot.prompt} ${tag}`.trim() })}>
@@ -2496,6 +2556,41 @@ export function LibraryView() {
     <div style={{ display: "flex", flexDirection: "column", gap: 12, overflow: "hidden", minHeight: 0 }}>
       <div className="row" style={{ gap: 12, alignItems: "flex-end" }}>
         <label style={{ margin: 0 }}>Library — one asset can be a character, a location, a prop, a voice…</label>
+        {ui.project && (
+          <Field label="Project character" hint="Inherited by new shots and still boards. Set a role of “character” to sort it to the top.">
+            <div className="row" style={{ gap: 6 }}>
+              <select
+                className="grow"
+                value={ui.project.defaultCharacterId ?? ""}
+                onChange={(e) => {
+                  const id = e.target.value || null;
+                  void api.setProjectCharacter(ui.project!.id, id, false).then(() => {
+                    void ui.refreshAll();
+                    ui.toast(id ? "Project character set" : "Project character cleared");
+                  }).catch((err: unknown) => ui.toast((err as Error).message, "err"));
+                }}
+              >
+                <option value="">None</option>
+                {ui.assets.filter((a) => a.kind === "image")
+                  .sort((a, b) => Number(b.role === "character") - Number(a.role === "character"))
+                  .map((a) => <option key={a.id} value={a.id}>{a.role === "character" ? "★ " : ""}{a.name}</option>)}
+              </select>
+              <button
+                className="small"
+                title="Bind this character to every existing shot and still board"
+                disabled={!ui.project.defaultCharacterId}
+                onClick={() => {
+                  void api.setProjectCharacter(ui.project!.id, ui.project!.defaultCharacterId ?? null, true).then((r) => {
+                    void ui.refreshAll();
+                    ui.toast(`Identity locked on ${r.touched.length} shot(s)`);
+                  }).catch((err: unknown) => ui.toast((err as Error).message, "err"));
+                }}
+              >
+                Apply to all
+              </button>
+            </div>
+          </Field>
+        )}
         <div className="grow" />
         <Field label="Import from a server path">
           <ServerPathImport />

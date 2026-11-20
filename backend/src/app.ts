@@ -424,12 +424,16 @@ export function buildApp(deps: { director: Director; getComfy: () => ComfyClient
       // script, importing a shot list, or any tool that builds a cut needs to
       // create a real shot in one call rather than create-then-patch.
       const patch = body<{ kind?: Shot["kind"]; name?: string; prompt?: string; seconds?: number }>(req);
-      const kind = patch.kind ?? "t2v";
+      // A project cast is inherited by every new shot. Identity conditioning
+      // needs H3 reference mode: image mode only has room for two keyframes.
+      const inheritedCharacter = p.defaultCharacterId ?? null;
+      const kind = inheritedCharacter ? "r2v" : (patch.kind ?? "t2v");
       const d = p.defaults;
       const shot: Shot = {
         id: newShotId(), name: patch.name ?? `Shot ${p.shots.length + 1}`, kind, prompt: patch.prompt ?? "",
         imageIds: [], videoIds: [], audioIds: [], firstFrameId: null, lastFrameId: null,
         continueFromPrev: false,
+        characterId: inheritedCharacter,
         seconds: patch.seconds != null ? clampShotSeconds(Number(patch.seconds)) : d.seconds,
         fps: d.fps, resolution: d.resolution,
         aspect: d.aspect, width: 1344, height: 768, steps: d.steps, sampler: d.sampler,
@@ -442,6 +446,58 @@ export function buildApp(deps: { director: Director; getComfy: () => ComfyClient
       res.json({ shot, project: p });
     }),
   );
+  /** Bind or clear the source character that keeps a shot's identity stable. */
+  app.post(
+    "/api/projects/:id/shots/:shotId/character",
+    asyncWrap(async (req, res) => {
+      const p = getProject(req.params.id);
+      const shot = p?.shots.find((s) => s.id === req.params.shotId);
+      if (!p || !shot) { res.status(404).json({ error: "Shot not found" }); return; }
+      const { characterId } = body<{ characterId?: string | null }>(req);
+      const id = typeof characterId === "string" && characterId ? characterId : null;
+      if (id) {
+        const a = getAsset(id);
+        if (!a) { res.status(400).json({ error: "Character asset not found" }); return; }
+        if (a.kind !== "image") { res.status(400).json({ error: "The source character must be an image." }); return; }
+      }
+      shot.characterId = id;
+      // The MiniMax H3 Easy node accepts only two images in image mode (first
+      // and last frame). Reference mode is the only place an identity image can
+      // coexist with the frames, so attaching a character switches the shot.
+      if (id) shot.kind = "r2v";
+      saveProject(p);
+      res.json(shot);
+    }),
+  );
+
+  /** Set the project cast; optionally propagate it to every existing shot and board. */
+  app.post(
+    "/api/projects/:id/character",
+    asyncWrap(async (req, res) => {
+      const p = getProject(req.params.id);
+      if (!p) { res.status(404).json({ error: "Project not found" }); return; }
+      const { characterId, applyToAll } = body<{ characterId?: string | null; applyToAll?: boolean }>(req);
+      const id = typeof characterId === "string" && characterId ? characterId : null;
+      if (id) {
+        const a = getAsset(id);
+        if (!a) { res.status(400).json({ error: "Character asset not found" }); return; }
+        if (a.kind !== "image") { res.status(400).json({ error: "The source character must be an image." }); return; }
+      }
+      p.defaultCharacterId = id;
+      const touched: string[] = [];
+      if (applyToAll) {
+        for (const s of p.shots) {
+          s.characterId = id;
+          if (id) s.kind = "r2v";
+          touched.push(s.id);
+        }
+        for (const b of boardsOf(p)) b.characterId = id;
+      }
+      saveProject(p);
+      res.json({ project: p, touched });
+    }),
+  );
+
   app.post(
     "/api/projects/:id/shots/:shotId/duplicate",
     asyncWrap(async (req, res) => {
@@ -656,6 +712,7 @@ export function buildApp(deps: { director: Director; getComfy: () => ComfyClient
         prompt: prompt ?? "",
         negativePrompt: "",
         imageIds: refs,
+        characterId: p.defaultCharacterId ?? null,
         width: num(width, 1328, 256, 4096),
         height: num(height, 1328, 256, 4096),
         steps: typeof steps === "number" && Number.isFinite(steps)

@@ -44,13 +44,18 @@ the engine and adds the layer that was missing:
    **Continue from previous shot's final frame (seamless)** is enabled, overwrites the
    next clip's first frame with the previous clip's exact last frame. The cut is
    frame-identical, not merely a similar-looking prompt continuation.
-4. **Takes instead of throwaway renders.** Every still and video render becomes a take
+4. **Character identity lock.** A source portrait is bound to the project or to a
+   shot and is attached to *both* stages. Qwen receives it as a still reference; H3
+   receives it as `<Picture 1>` in reference mode, ahead of the seam frame and your
+   other references. A head turn, a reverse angle or a new shot no longer means a new
+   face. Existing `<Picture N>` tags are renumbered automatically.
+5. **Takes instead of throwaway renders.** Every still and video render becomes a take
    with its seed, prompt, graph and log. Compare variants, promote the best image to
    the Library, accept the best video, and export only accepted takes.
-5. **Real references and voice.** Characters, locations, motion clips and voices live
+6. **Real references and voice.** Characters, locations, motion clips and voices live
    in a tagged Library. Reference files are content-hashed and staged into ComfyUI, so
    `<Picture N>`, `<Video N>` and `<Audio N>` always point at the bytes you intended.
-6. **Reproducibility and safety.** The exact graph sent to ComfyUI is saved beside the
+7. **Reproducibility and safety.** The exact graph sent to ComfyUI is saved beside the
    take, every job has a JSONL log, projects are written atomically with backups, and
    the whole runtime `data/` directory stays out of git.
 
@@ -65,6 +70,7 @@ Everything runs locally. No account, telemetry or cloud service is required for 
 | **Timeline** | Add, duplicate, split, reorder and resize shots. Shift-click a range for batch chain / render / delete. Ctrl+Z undoes structural changes. |
 | **Still / image generation** | Stage 1 per shot: `none`, `t2i` **text-to-image** (Qwen writes the picture) or `i2i` **image-to-image** (Qwen edits Library references). Up to 4 variants, random or fixed seeds, its own take list. |
 | **Video generation** | Stage 2: `t2v` text-to-video, `i2v` first-frame image, `fl2v` first **and** last frame locked, `r2v` character / location / voice references. H3 writes picture and sound in one pass. |
+| **Character lock** | One source portrait per project or shot. Attached to Qwen stills and to H3 as `<Picture 1>`; the seam frame follows as `<Picture 2>`, and existing picture tags are shifted. Attaching it switches stage 2 to reference mode. |
 | **References** | Content-hashed staging into `ComfyUI/input/h3director/`; up to 9 images, 3 videos and 3 audio references per shot. Drag an image from Explorer straight onto a shot tile. |
 | **Seamless chain** | The checkbox **Continue from previous shot's final frame (seamless)** extracts the exact previous last frame and conforms it as the next clip's first frame. Measured seams: PSNR about 37 dB. |
 | **Queue** | Serial render queue with live WebSocket updates, per-shot re-render, cancel, durable JSONL job logs and saved compiled graphs. |
@@ -218,6 +224,47 @@ frame 0 of the next clip. Frame rate, frame count and audio are preserved.
 Use it on every shot after the first. Use **Seamless chain** on a selected timeline
 range to enable it for several shots at once. A shot that has just generated its own Qwen
 still deliberately ignores it, so the picture you made is not overwritten.
+
+---
+
+## Character consistency (source-character lock)
+
+A frame-perfect seam does not guarantee the same person. If a shot ends with a character
+turning away, the next shot can still invent a different face — the seam fixes the
+*boundary*, not the identity. The character lock attaches one source portrait to the
+shot so both model stages know who they are rendering.
+
+### Set it up
+
+1. Drop a clear, front-facing portrait into the **Library** and set its role to
+   `character`. Characters sort to the top of every picker.
+2. Choose **Library → Project character** to set the cast for new shots and still
+   boards, then **Apply to all** to bind it to the shots you already have. Or set it
+   per shot in **Source character — identity lock** in the shot inspector.
+3. Leave **Continue from previous shot's final frame (seamless)** on. The lock and the
+   seam work together: one protects the face, the other protects the cut.
+
+Attaching a character switches Stage 2 to **Reference Video**. This is deliberate:
+the installed MiniMax H3 Easy node accepts only two images in image mode (first and
+last frame), so identity can only be conditioned in reference mode.
+
+### What actually reaches the models
+
+| Stage | Attachment |
+| --- | --- |
+| Qwen text → image | The portrait is reference image 1, but sampling keeps your chosen empty latent — the portrait guides identity, not the canvas size. |
+| Qwen image → image | The image being edited stays first so its framing survives; the portrait follows it as a reference. |
+| H3 video | `<Picture 1>` is the source character, `<Picture 2>` is the seam frame or pinned first frame, then your other references. Existing `<Picture N>` tags in the prompt are renumbered automatically; `<Video N>` and `<Audio N>` are unchanged. |
+
+The compiled prompt states the rule explicitly: reference 1 is the named character,
+keep the same face, hair, age, skin tone and build, and do not change identity. Voice
+references continue to work through `<Audio N>`.
+
+**Limits.** Identity conditioning is probabilistic, not a fingerprint lock: use a
+sharp, well-lit portrait and avoid extreme angles in the source. One portrait locks one
+character per shot; for two characters, attach the second as an extra reference and
+mention its `<Picture N>` tag in the prompt. The stored prompt is never rewritten — only
+the compiled copy sent to ComfyUI is renumbered.
 
 ---
 

@@ -10,6 +10,7 @@ import path from "node:path";
 import { collectOutputFiles, ComfyClient } from "./comfy";
 import { absData, stageFiles, uploadImage } from "./media";
 import { getAsset } from "./store";
+import { identityRuleForQwen } from "./types";
 import type { ImageBoard, ImageMode, Project, ShotStill } from "./types";
 
 export interface QwenModels {
@@ -46,6 +47,8 @@ export interface RenderImageInputs {
   destId: string;
   /** How long to wait for this image before giving up (ms). Default 20 minutes. */
   timeoutMs?: number;
+  /** Identity lock from the owning shot; boards carry their own characterId. */
+  characterId?: string | null;
 }
 
 export interface ImageRenderResult {
@@ -250,15 +253,36 @@ export async function renderImage(opts: RenderImageInputs): Promise<ImageRenderR
   const probe = await resolveQwenModels(comfy);
   if (!probe.ready || !probe.models) throw new Error(probe.error ?? "Qwen Image 2.1 is not available in ComfyUI.");
 
-  // Stage reference images so LoadImage can reference them by filename.
-  const refAbs: string[] = [];
+  // A shot's still may leave its prompt empty to inherit the shot's own prompt.
+  const isEdit = (board as ShotStill).mode === "i2i" || board.mode === "edit";
+
+  // Identity lock. In text-to-image the character leads, because there is no
+  // source frame to preserve; in edit mode the image being edited must lead so
+  // the encoder's latent keeps its framing, and the character follows.
+  const userRefAbs: string[] = [];
   for (const id of board.imageIds) {
     const a = getAsset(id);
     if (!a) continue;
     if (a.kind !== "image") throw new Error(`Reference "${a.name}" is not an image.`);
-    refAbs.push(absData(a.file));
+    userRefAbs.push(absData(a.file));
   }
+  const characterId = opts.characterId ?? board.characterId ?? null;
+  const character = characterId ? getAsset(characterId) : undefined;
+  if (characterId && !character) throw new Error(`Character asset not found: ${characterId}`);
+  if (character && character.kind !== "image") throw new Error(`Character "${character.name}" is not an image.`);
+  const characterAbs = character ? absData(character.file) : null;
 
+  const seen = new Set<string>();
+  const refAbs: string[] = [];
+  const addRef = (abs: string | null) => {
+    if (abs && !seen.has(abs)) { seen.add(abs); refAbs.push(abs); }
+  };
+  if (!isEdit) addRef(characterAbs);
+  userRefAbs.forEach(addRef);
+  if (isEdit) addRef(characterAbs);
+  const identityRef = characterAbs ? refAbs.indexOf(characterAbs) + 1 : 0;
+
+  // Stage reference images so LoadImage can reference them by filename.
   const staged: string[] = [];
   if (refAbs.length) {
     if (comfyInputDir) {
@@ -279,10 +303,12 @@ export async function renderImage(opts: RenderImageInputs): Promise<ImageRenderR
     }
   }
 
-  // A shot's still may leave its prompt empty to inherit the shot's own prompt.
-  const isEdit = (board as ShotStill).mode === "i2i" || board.mode === "edit";
-  const prompt = board.prompt.trim() || (opts.fallbackPrompt ?? "").trim()
+  let prompt = board.prompt.trim() || (opts.fallbackPrompt ?? "").trim()
     || (isEdit ? "Refine this image." : "A cinematic film still.");
+  if (identityRef && character) {
+    const name = path.basename(character.name, path.extname(character.name));
+    prompt = `${prompt}\n\n${identityRuleForQwen(identityRef, name)}`;
+  }
 
   const plan = buildImageGraph({
     mode: isEdit ? "edit" : "t2i",

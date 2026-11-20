@@ -760,6 +760,7 @@ export class Director {
           comfyInputDir,
           destId: `shot-${shot.id}`,
           timeoutMs: this.getSettings().imageTimeoutMin * 60_000,
+          characterId: shot.characterId ?? null,
         });
         const take: ImageTake = {
           id: crypto.randomUUID().slice(0, 8),

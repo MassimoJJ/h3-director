@@ -7,6 +7,11 @@ All notable changes are listed here. The format follows
 
 ### Added
 
+- Source-character lock: bind one portrait at project or shot level, carry it into
+  Qwen stills and into H3 as `<Picture 1>`, and keep the seam frame as `<Picture 2>`.
+  Existing `<Picture N>` tags are renumbered automatically.
+- Character-lock pickers in the shot inspector, Stills boards and Library, plus a 🔒
+  timeline badge and a regression harness for identity ordering.
 - Public documentation set: installation, architecture, workflows, API, verification
   and troubleshooting.
 - Clean UI screenshots and a contributor guide.

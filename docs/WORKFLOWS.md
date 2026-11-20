@@ -99,16 +99,46 @@ that shot on purpose - otherwise the picture you just made would be replaced.
 
 ---
 
+## Keeping the same character across shots
+
+A seamless cut still allows H3 to re-imagine the face — especially after a head turn or
+a change to a close-up. Bind a source portrait so both stages receive identity conditioning:
+
+1. Put a clear, front-facing portrait in the **Library** and set its role to `character`.
+2. In **Library**, pick it under **Project character** and press **Apply to all** to bind
+   it to every existing shot and still board. New shots inherit it automatically.
+   For a single character in one scene, use **Source character — identity lock** in that
+   shot's inspector instead.
+3. Keep **Continue from previous shot's final frame (seamless)** enabled. The seam frame
+   does not replace the character reference: it becomes `<Picture 2>` after the portrait.
+4. In the **Stills** tab, set the same portrait under **Character lock** on each board if
+   you generate stills there.
+
+Attaching a character changes Stage 2 to `r2v`, because MiniMax H3 Easy image mode has
+space for only two keyframes. The first/last frames you already chose are not lost: they
+are carried as additional picture references. Any `<Picture N>` tags already in your
+prompt are shifted by the number of images prepended, so they keep pointing at the same
+files. The app shows a 🔒 badge on timeline tiles that have a lock.
+
+If the face still drifts, try a tighter, better-lit source portrait and add an explicit
+visual description in the prompt. Identity conditioning is strong but not deterministic.
+
+---
+
 ## Library and references
 
 The **Library** tab holds characters, locations, motion clips and voices.
 
 - Upload files or import them from disk.
 - Set a **role** (`character`, `voice`, `location`, `motion`, `style`, `prop`, `other`)
-  and tags so both you and the AI co-director can find them.
+  and tags so both you and the AI co-director can find them. Assets with the
+  `character` role sort to the top of the character pickers.
+- **Project character** chooses the cast inherited by new shots and boards. **Apply to
+  all** binds it to the shots and boards that already exist.
 - On an `r2v` shot, use the reference panels to attach up to **9 images, 3 videos and
-  3 audio** files. The `+` button either attaches the selected Library item or opens a
-  file picker when nothing is selected.
+  3 audio** files. The portrait locked as the source character occupies `<Picture 1>`;
+  these are the *other* references and are numbered after it. The `+` button either
+  attaches the selected Library item or opens a file picker when nothing is selected.
 - You can also drag files from Explorer directly onto a shot tile.
 
 Files are staged into ComfyUI with content-hashed names, so adding the same reference

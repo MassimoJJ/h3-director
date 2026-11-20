@@ -324,14 +324,22 @@ export function draftsToShots(project: Project, drafts: DraftShot[], assetById: 
   const d = project.defaults;
   return drafts.map((dr) => {
     const now = Date.now() + Math.random();
+    // A character mentioned in the script wins over the project default, but
+    // either one forces reference mode: identity cannot be conditioned in the
+    // two-slot first/last-frame image mode.
+    const cast = dr.usesAssets
+      .map((n) => assetById.get(n.toLowerCase().replace(/\.[a-z0-9]+$/, "")))
+      .find((a) => a?.kind === "image" && a.role === "character");
+    const characterId = cast?.id ?? project.defaultCharacterId ?? null;
     const shot: Shot = {
       id: `${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`,
       name: dr.name,
-      kind: dr.kind,
+      kind: characterId ? "r2v" : dr.kind,
       prompt: dr.prompt,
       imageIds: [],
       videoIds: [],
       audioIds: [],
+      characterId,
       firstFrameId: null,
       lastFrameId: null,
       continueFromPrev: false,

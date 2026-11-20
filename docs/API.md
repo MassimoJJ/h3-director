@@ -74,6 +74,8 @@ client immediately - the old address is not kept for the rest of the process.
 | `POST` | `/api/projects/:id/shots` | Add a shot |
 | `POST` | `/api/projects/:id/shots/:shotId/duplicate` | Duplicate a shot |
 | `POST` | `/api/projects/:id/shots/:shotId/split` | Split a shot |
+| `POST` | `/api/projects/:id/shots/:shotId/character` | Bind/clear a shot's source character (`{ characterId }`) |
+| `POST` | `/api/projects/:id/character` | Set the project cast (`{ characterId, applyToAll }`) |
 | `DELETE` | `/api/projects/:id/shots/:shotId` | Delete a shot and its media |
 | `POST` | `/api/projects/:id/reorder` | Persist a new shot order |
 | `POST` | `/api/projects/:id/shots/:shotId/takes/:takeId/accept` | Accept a take |
@@ -81,8 +83,11 @@ client immediately - the old address is not kept for the rest of the process.
 
 The canonical `Shot` object includes `kind`, `prompt`, `seconds`, `resolution`,
 `aspect`, `fps`, `steps`, `sampler`, `scheduler`, `seed`, image/video/audio reference
-ids, `continueFromPrev`, `still`, `takes` and the chosen `modelFl2va` / `modelRef2va` /
-`modelTextEncoder` overrides. See `backend/src/types.ts` for the full shape.
+ids, `characterId`, `continueFromPrev`, `still`, `takes` and the chosen `modelFl2va` /
+`modelRef2va` / `modelTextEncoder` overrides. A project also carries
+`defaultCharacterId`, inherited by new shots and boards. Setting a character forces
+`kind: "r2v"`, because H3 image mode has no identity slot. See `backend/src/types.ts`
+for the full shape.
 
 ---
 

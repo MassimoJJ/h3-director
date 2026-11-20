@@ -1,12 +1,13 @@
 # Verification
 
-There are three levels of verification. None of them require a real render, so they are
+There are four levels of verification. None of them require a real render, so they are
 safe to run before a release or after a refactor.
 
 ```bash
-npm run verify          # typecheck + web build + data-safety checks
-npm run verify:store    # fast data-safety checks only
-npm run verify:timeline # real-browser timeline geometry and drag checks
+npm run verify           # typecheck + web build + data-safety + character-lock checks
+npm run verify:store     # data-safety checks only
+npm run verify:character # character identity ordering and tag remapping
+npm run verify:timeline  # real-browser timeline geometry and drag checks
 ```
 
 ---
@@ -66,7 +67,21 @@ The checks cover failures that previously destroyed work:
 
 ---
 
-## 4. Timeline regression
+## 4. Character-lock regressions
+
+```bash
+npm run verify:character
+```
+
+Runs `scripts/character-lock.check.cjs` through `tsx` against a temporary data
+directory. It verifies that prepending the identity image renumbers existing
+`<Picture N>` tags without touching `<Video N>` / `<Audio N>`, that the H3 graph wires
+the portrait first and the seam frame second, and that Qwen's `t2i` path keeps an empty
+latent while `i2i` samples from the encoder latent built on the source image.
+
+---
+
+## 5. Timeline regression
 
 ```bash
 npm run verify:timeline

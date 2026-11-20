@@ -9,7 +9,7 @@ import { absData, stageFiles, uploadImage } from "./media";
 import { conformFrame, extractFirstFrame } from "./ffmpeg";
 import { ensureOutputDirs, getAsset } from "./store";
 import type { AppSettings, EngineProbe, Project, Shot } from "./types";
-import { clampShotSeconds } from "./types";
+import { clampShotSeconds, identityRuleForH3, shiftPictureTags } from "./types";
 
 export interface EngineModels {
   fl2va: string;
@@ -64,13 +64,25 @@ export function compilePrompt(
   prompt: string,
   audioCount: number,
   r2vContinuationText: string | undefined,
+  identity?: { name: string; picture: number; pictureShift: number; startPicture?: number; startIsChain?: boolean },
 ): string {
-  let out = prompt.trim();
+  // Identity images are PREPENDED, so every <Picture N> the director wrote has
+  // to be renumbered before it reaches H3. The stored prompt is never mutated.
+  let out = (identity ? shiftPictureTags(prompt, identity.pictureShift) : prompt).trim();
   const parts: string[] = [];
   if (audioCount > 0 && !hasTag(out, "<Audio")) {
     parts.push(`All speech in this shot is spoken in the voice of the person in <Audio ${audioCount}>.`);
   }
-  if (kind === "r2v" && r2vContinuationText) parts.push(r2vContinuationText);
+  if (identity) {
+    parts.push(identityRuleForH3(identity.picture, identity.name));
+    if (identity.startPicture) {
+      parts.push(identity.startIsChain
+        ? `<Picture ${identity.startPicture}> is the exact final frame of the previous shot. Begin this shot from that image — same person, pose, wardrobe, framing and location.`
+        : `<Picture ${identity.startPicture}> is this shot's starting image. Begin the shot from it — same person, pose, wardrobe, framing and location.`);
+    }
+  } else if (kind === "r2v" && r2vContinuationText) {
+    parts.push(r2vContinuationText);
+  }
   if (parts.length) out = `${out}\n\n${parts.join(" ")}`;
   return out;
 }
@@ -297,11 +309,42 @@ export async function planShot(ctx: RenderInputs, presence: NodePresence): Promi
   const refImageAbs: string[] = [];
   const refVideoAbs: string[] = [];
   const refAudioAbs: string[] = [];
+  let identity: { name: string; picture: number; pictureShift: number; startPicture?: number; startIsChain?: boolean } | undefined;
+
+  // Resolve the identity lock BEFORE the media caps: the character image is the
+  // one attachment the room refuses to drop, even on a crowded reference shot.
+  const character = shot.characterId ? getAsset(shot.characterId) : undefined;
+  if (shot.characterId && !character) throw new Error(`Character asset not found: ${shot.characterId}`);
+  if (character && character.kind !== "image") throw new Error(`Character "${character.name}" is not an image.`);
+
   if (!imageMode) {
+    if (character) {
+      refImageAbs.push(assetAbs(character.id)); // <Picture 1> — identity
+      const chain = ctx.firstFrameOverride ?? ctx.extraRefImageOverride ?? null;
+      const start = chain ?? (shot.firstFrameId ? assetAbs(shot.firstFrameId) : null);
+      if (start) refImageAbs.push(start); // <Picture 2> — continuity
+      if (shot.lastFrameId) refImageAbs.push(assetAbs(shot.lastFrameId)); // <Picture 3>
+      identity = {
+        name: path.basename(character.name, path.extname(character.name)),
+        picture: 1,
+        pictureShift: refImageAbs.length,
+        ...(start ? { startPicture: 2, startIsChain: !!chain } : {}),
+      };
+      warnings.push(
+        `Character lock: ${identity.name} is attached as <Picture 1> so every still and video in this shot keeps the same identity.`,
+      );
+    }
     for (const id of shot.imageIds) refImageAbs.push(assetAbs(id));
-    if (ctx.extraRefImageOverride) refImageAbs.push(ctx.extraRefImageOverride);
+    if (ctx.extraRefImageOverride && !refImageAbs.includes(ctx.extraRefImageOverride)) {
+      refImageAbs.push(ctx.extraRefImageOverride);
+    }
     for (const id of shot.videoIds) refVideoAbs.push(assetAbs(id));
     for (const id of shot.audioIds) refAudioAbs.push(assetAbs(id));
+  } else if (character) {
+    warnings.push(
+      "This shot is still in image mode, where H3 accepts only first/last frames and cannot carry a character reference. " +
+      "Re-attach the character in the shot inspector to switch it to reference mode.",
+    );
   }
 
   if (!imageMode && shot.audioIds.length && refImageAbs.length + refVideoAbs.length === 0) {
@@ -353,6 +396,7 @@ export async function planShot(ctx: RenderInputs, presence: NodePresence): Promi
     shot.prompt,
     refAudioAbs.length,
     ctx.r2vContinuationText,
+    identity,
   );
 
   const plan = buildGraph(

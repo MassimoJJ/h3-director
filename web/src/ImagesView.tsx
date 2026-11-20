@@ -208,6 +208,23 @@ export function ImagesView() {
               </div>
 
               <Field
+                label="Character lock"
+                hint="This image is attached to every still this board renders, so successive takes keep the same face."
+              >
+                <select
+                  value={sel.characterId ?? ""}
+                  onChange={(e) => patch(sel, { characterId: e.target.value || null })}
+                >
+                  <option value="">None — no identity lock</option>
+                  {ui.assets.filter((a) => a.kind === "image")
+                    .sort((a, b) => Number(b.role === "character") - Number(a.role === "character"))
+                    .map((a) => (
+                      <option key={a.id} value={a.id}>{a.role === "character" ? "★ " : ""}{a.name}</option>
+                    ))}
+                </select>
+              </Field>
+
+              <Field
                 label="Prompt"
                 hint={sel.mode === "edit" ? "Describe the change. Source framing, subject and lighting are preserved." : undefined}
               >

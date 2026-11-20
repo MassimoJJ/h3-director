@@ -48,6 +48,8 @@ export interface ImageBoard {
   prompt: string;
   negativePrompt: string;
   imageIds: string[];
+  /** Library image whose identity is attached to every still rendered with this setup. */
+  characterId?: string | null;
   width: number;
   height: number;
   steps: number;
@@ -69,6 +71,8 @@ export interface ShotStill {
   prompt: string;
   negativePrompt: string;
   imageIds: string[];
+  /** Library image whose identity is attached to every still rendered with this setup. */
+  characterId?: string | null;
   width: number;
   height: number;
   steps: number;
@@ -94,6 +98,8 @@ export interface Shot {
   imageIds: string[];
   videoIds: string[];
   audioIds: string[];
+  /** Library image whose identity is bound to every still and video in this shot. */
+  characterId?: string | null;
   firstFrameId: string | null;
   lastFrameId: string | null;
   continueFromPrev: boolean;
@@ -137,6 +143,8 @@ export interface Project {
     refImageSize: string;
   };
   shots: Shot[];
+  /** Character inherited by newly created shots and still boards. */
+  defaultCharacterId?: string | null;
   boards?: ImageBoard[];
 }
 
@@ -288,6 +296,18 @@ export const api = {
     http<{ project: Project; split: { aId: string; bId: string } }>(`/api/projects/${id}/shots/${shotId}/split`, { method: "POST" }),
   deleteShot: (id: string, shotId: string) => http<{ project: Project }>(`/api/projects/${id}/shots/${shotId}`, { method: "DELETE" }),
   reorder: (id: string, shotIds: string[]) => http<{ project: Project }>(`/api/projects/${id}/reorder`, { method: "POST", body: JSON.stringify({ shotIds }) }),
+
+  // ---------- character consistency ----------
+  setShotCharacter: (projectId: string, shotId: string, characterId: string | null) =>
+    http<Shot>(`/api/projects/${projectId}/shots/${shotId}/character`, {
+      method: "POST",
+      body: JSON.stringify({ characterId }),
+    }),
+  setProjectCharacter: (projectId: string, characterId: string | null, applyToAll = false) =>
+    http<{ project: Project; touched: string[] }>(`/api/projects/${projectId}/character`, {
+      method: "POST",
+      body: JSON.stringify({ characterId, applyToAll }),
+    }),
 
   // ---------- the still stage (pipeline stage 1 of a shot) ----------
   /** mode is optional: omit it to patch fields without changing the stage type. */
