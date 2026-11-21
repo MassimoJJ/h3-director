@@ -92,10 +92,11 @@ settings do not apply.
 
 Check that the previous shot's take was **accepted** and that the next shot has
 "Continue from previous" enabled. A shot with a freshly generated still deliberately
-ignores chaining. Inspect the cut frame by frame; the app holds the exact keyframe for
-6 frames and dissolves into the generated motion, so the first 0.25s should be visibly
-identical to the previous shot's ending. A jump inside that hold means the conform step
-failed - see the job log.
+ignores chaining. Inspect the cut frame by frame: frame 0 must be the previous shot's
+exact final frame, and the next frames must keep moving while they dissolve into H3's
+generated motion. If several consecutive frames are pixel-identical, the clip was made
+by an older version with a frozen hold - re-render or re-conform it. If frame 0 itself
+differs, the conform step failed - see the job log.
 
 ### The face changes between shots, even with a clean seam
 

@@ -101,8 +101,9 @@ export interface ConformResult {
  *
  * For a director tool the seam has to be exact, so we conform it in post: the keyframe
  * is resampled exactly like the node does it (cover-scale + centre crop to the clip
- * canvas, comfy.utils.common_upscale(..., "center")), held for 6 frames, then dissolved
- * into the generated motion over 12 frames. Frame count, fps and audio are untouched.
+ * canvas, comfy.utils.common_upscale(..., "center")) and written as frame 0. It then
+ * dissolves into the generated motion immediately - there is deliberately NO frozen
+ * hold, because a still hold reads as the cut stopping. Frame 1 already moves.
  */
 export async function conformFrame(
   videoAbs: string,
@@ -119,20 +120,19 @@ export async function conformFrame(
   const { width: w, height: h } = info;
 
   // A one-frame swap is not enough: H3 regenerates frame 1 from its conditioning
-  // image, so the cut jumps immediately after the exact frame-0 conform. Hold the
-  // real previous final frame for a few frames, then dissolve into the generated
-  // motion. The clip duration is unchanged and its audio is untouched.
-  const HOLD_FRAMES = 6;
-  const FADE_FRAMES = 12;
-  if (which === "first" && info.frames > HOLD_FRAMES + FADE_FRAMES) {
-    const bridge = HOLD_FRAMES + FADE_FRAMES;
+  // image, so a raw swap jumps immediately after the exact frame-0 conform. Blend
+  // frame 0 into the generated motion over a short window instead. The dissolve
+  // source is the MOVING generated clip (not a still), so there is no freeze: the
+  // shot keeps moving from frame 1 onwards while frame 0 stays pixel-exact.
+  const FADE_FRAMES = 10;
+  if (which === "first" && info.frames > FADE_FRAMES + 1) {
     const keyStream =
       `[1:v]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,` +
-      `format=yuv420p,fps=${fps},trim=end_frame=${bridge},setpts=PTS-STARTPTS[kf]`;
+      `format=yuv420p,fps=${fps},trim=end_frame=${FADE_FRAMES},setpts=PTS-STARTPTS[kf]`;
     const keepStream =
-      `[0:v]trim=start_frame=${HOLD_FRAMES},setpts=PTS-STARTPTS,fps=${fps},format=yuv420p[rest]`;
+      `[0:v]trim=start_frame=1,setpts=PTS-STARTPTS,fps=${fps},format=yuv420p[rest]`;
     const chain =
-      `[kf][rest]xfade=transition=fade:duration=${FADE_FRAMES / fps}:offset=${HOLD_FRAMES / fps}[v]`;
+      `[kf][rest]xfade=transition=fade:duration=${FADE_FRAMES / fps}:offset=0[v]`;
     try {
       await run(
         FFMPEG,
