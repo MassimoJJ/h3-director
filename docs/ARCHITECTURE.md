@@ -185,11 +185,10 @@ For a director tool the seam must be exact, so `conformFrame()`:
 1. probes the rendered clip for width, height, fps and frame count;
 2. resamples the keyframe exactly like the node does - cover-scale, centre crop,
    `yuv420p`;
-3. writes it as frame 0, then dissolves into the **moving** generated clip over the
-   next 10 frames. There is intentionally no frozen still hold: a hold reads as the
-   cut stopping. A one-frame swap alone still jumped at frame 1 (17.9 dB PSNR between
-   frames 0 and 1);
-4. keeps fps and audio (the dissolve consumes one regenerated frame);
+3. writes it as frame 0, then builds a 10-frame motion-compensated morph between that
+   exact image and the generated frame at 10 frames. No frozen hold (the cut would stop)
+   and no crossfade (the body would ghost into two overlapping silhouettes);
+4. keeps fps and audio (the morph replaces the first 10 regenerated frames);
 5. re-encodes with `libx264 -crf 16`, `aac 192k` and `+faststart`.
 
 This is why **Seamless chain** produces frame-identical cuts instead of merely

@@ -86,14 +86,14 @@ To make them cut together:
 2. Render shot 1, open it in **Gallery** and **accept** the take you like.
 3. On shot 2, tick **Continue from previous shot's final frame (seamless)**.
 4. Render shot 2. The backend extracts the exact last frame of shot 1, writes it as
-   frame 0, then immediately dissolves into H3's moving generated motion.
+   frame 0, then morphs into H3's generated motion with optical flow.
 5. Repeat down the timeline, or use **Seamless chain** on a selected range.
 
 Why this is not just a prompt trick is explained in
 [docs/ARCHITECTURE.md](ARCHITECTURE.md#why-seams-need-ffmpeg). The short version: H3
 regenerates keyframes from context, so the last frame is only *similar* unless the app
-writes the real frame and blends into the generated motion in post. The blend uses the
-moving clip, never a frozen copy of the still.
+writes the real frame and morphs into the generated motion in post. The morph is
+motion-compensated, so there is no frozen still and no doubled silhouette.
 
 If a shot has a freshly generated Qwen still, "continue from previous" is ignored for
 that shot on purpose - otherwise the picture you just made would be replaced.

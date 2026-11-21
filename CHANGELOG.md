@@ -18,10 +18,11 @@ All notable changes are listed here. The format follows
   `<Video N>` reference, so H3 conditions on the camera and location near the cut — not on
   the full clip, whose opening image may be the source portrait and cause a snap-back.
   One of the three video slots is reserved for that continuity clip.
-- Seam conform writes the exact previous final frame as frame 0 and dissolves into the
-  **moving** generated footage over 10 frames. A single frame-0 swap jumped at frame 1
-  (17.9 dB PSNR); the earlier frozen hold removed the jump but made the cut appear to
-  stop. The moving dissolve keeps frame 0 exact without a still freeze.
+- Seam conform writes the exact previous final frame as frame 0 and uses
+  motion-compensated interpolation to morph into the generated footage over 10 frames.
+  A single frame-0 swap jumped at frame 1 (17.9 dB PSNR); a frozen hold stopped the cut
+  and a crossfade ghosted the body into two overlapping silhouettes. The morph keeps one
+  clean body in place, with frame 0 pixel-exact.
 
 ### Added
 

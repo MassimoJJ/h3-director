@@ -540,7 +540,7 @@ export async function renderShot(opts: RenderInputs): Promise<ShotRenderResult> 
     if (res.ok) {
       fs.renameSync(tmp, videoAbs);
       plan.warnings.push(
-        `Conformed: ${which === "first" ? "frame 0 is the exact previous final frame, then dissolves into moving generated footage with no frozen hold" : "frame end replaced with the exact last-frame keyframe"} ` +
+        `Conformed: ${which === "first" ? "frame 0 is the exact previous final frame, then motion-compensated interpolation morphs into the generated footage with no frozen hold or crossfade ghost" : "frame end replaced with the exact last-frame keyframe"} ` +
         "(H3 only conditions on keyframes, it does not copy them).",
       );
     } else {

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileP = promisify(execFile);
@@ -102,8 +103,9 @@ export interface ConformResult {
  * For a director tool the seam has to be exact, so we conform it in post: the keyframe
  * is resampled exactly like the node does it (cover-scale + centre crop to the clip
  * canvas, comfy.utils.common_upscale(..., "center")) and written as frame 0. It then
- * dissolves into the generated motion immediately - there is deliberately NO frozen
- * hold, because a still hold reads as the cut stopping. Frame 1 already moves.
+ * morphs into the generated motion with motion-compensated interpolation (minterpolate),
+ * not a crossfade: a still hold reads as a freeze and a plain dissolve ghosts the
+ * silhouette into two overlapping bodies. The morph keeps one clean body in one place.
  */
 export async function conformFrame(
   videoAbs: string,
@@ -120,37 +122,83 @@ export async function conformFrame(
   const { width: w, height: h } = info;
 
   // A one-frame swap is not enough: H3 regenerates frame 1 from its conditioning
-  // image, so a raw swap jumps immediately after the exact frame-0 conform. Blend
-  // frame 0 into the generated motion over a short window instead. The dissolve
-  // source is the MOVING generated clip (not a still), so there is no freeze: the
-  // shot keeps moving from frame 1 onwards while frame 0 stays pixel-exact.
-  const FADE_FRAMES = 10;
-  if (which === "first" && info.frames > FADE_FRAMES + 1) {
-    const keyStream =
-      `[1:v]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,` +
-      `format=yuv420p,fps=${fps},trim=end_frame=${FADE_FRAMES},setpts=PTS-STARTPTS[kf]`;
-    const keepStream =
-      `[0:v]trim=start_frame=1,setpts=PTS-STARTPTS,fps=${fps},format=yuv420p[rest]`;
-    const chain =
-      `[kf][rest]xfade=transition=fade:duration=${FADE_FRAMES / fps}:offset=0[v]`;
+  // image, so a raw swap jumps immediately after the exact frame-0 conform. A
+  // crossfade removes the jump but superimposes two bodies (a visible ghost), and
+  // holding the still freezes the cut. Motion-compensated interpolation between
+  // the exact seam and the generated frame at BRIDGE_FRAMES gives one clean body
+  // that starts moving on frame 1 while frame 0 stays pixel-exact.
+  const BRIDGE_FRAMES = 10;
+  if (which === "first" && info.frames > BRIDGE_FRAMES + 1) {
+    const bridgeS = BRIDGE_FRAMES / fps;
+    const stem = `${outAbs}.seambridge`;
+    const startPng = `${stem}-start.png`;
+    const endPng = `${stem}-end.png`;
+    const listTxt = `${stem}.txt`;
+    const morphMp4 = `${stem}.morph.mp4`;
+    const quote = (s: string) => s.replaceAll("'", "'\\''");
     try {
       await run(
         FFMPEG,
         [
-          "-y", "-i", videoAbs,
-          "-loop", "1", "-framerate", String(fps), "-i", framePng,
-          "-filter_complex", `${keyStream};${keepStream};${chain}`,
-          "-map", "[v]", "-map", "0:a?",
+          "-y", "-v", "error", "-i", framePng,
+          "-vf", `scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1`,
+          "-frames:v", "1", startPng,
+        ],
+        120_000,
+      );
+      await run(
+        FFMPEG,
+        ["-y", "-v", "error", "-ss", String(bridgeS), "-i", videoAbs, "-frames:v", "1", endPng],
+        120_000,
+      );
+      fs.writeFileSync(
+        listTxt,
+        // ffmpeg resolves concat-list entries relative to the LIST file, not the cwd.
+        `file '${quote(path.resolve(startPng))}'\nduration ${bridgeS}\n` +
+        `file '${quote(path.resolve(endPng))}'\nduration ${bridgeS}\n` +
+        `file '${quote(path.resolve(endPng))}'\n`,
+        "utf8",
+      );
+      await run(
+        FFMPEG,
+        [
+          "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", listTxt,
+          "-vf", `minterpolate=fps=${fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1`,
+          "-t", String(bridgeS), "-an",
+          // lossless intermediate: the final concat re-encodes once, so frame 0
+          // survives as the exact seam image instead of a twice-compressed copy
+          "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0", "-pix_fmt", "yuv420p",
+          "-movflags", "+faststart", morphMp4,
+        ],
+        600_000,
+      );
+      await run(
+        FFMPEG,
+        [
+          "-y", "-v", "error", "-i", morphMp4, "-i", videoAbs, "-i", framePng,
+          "-filter_complex",
+          // minterpolate alters its own first frame (~43 dB), so lead with the
+          // resampled still itself; then the morph, then the untouched remainder.
+          `[2:v]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},setsar=1,` +
+          `format=yuv420p,fps=${fps},trim=end_frame=1,setpts=PTS-STARTPTS[head];` +
+          `[0:v]trim=start_frame=1,setpts=PTS-STARTPTS,fps=${fps},format=yuv420p[morph];` +
+          `[1:v]trim=start_frame=${BRIDGE_FRAMES},setpts=PTS-STARTPTS,fps=${fps},format=yuv420p[tail];` +
+          `[head][morph][tail]concat=n=3:v=1:a=0[v]`,
+          "-map", "[v]", "-map", "1:a?",
           "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-pix_fmt", "yuv420p",
           "-c:a", "aac", "-b:a", "192k",
-          "-movflags", "+faststart",
-          outAbs,
+          "-movflags", "+faststart", outAbs,
         ],
         600_000,
       );
       return { ok: true };
     } catch (e) {
-      return { ok: false, reason: e instanceof Error ? e.message.slice(0, 400) : String(e) };
+      const err = e as Error & { stderr?: string };
+      return { ok: false, reason: `${err.message}\n${err.stderr ?? ""}`.slice(0, 1500) };
+    } finally {
+      for (const f of [startPng, endPng, listTxt, morphMp4]) {
+        if (fs.existsSync(f)) fs.unlinkSync(f);
+      }
     }
   }
 
