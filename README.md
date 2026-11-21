@@ -45,10 +45,11 @@ the engine and adds the layer that was missing:
    next clip's first frame with the previous clip's exact last frame. The cut is
    frame-identical, not merely a similar-looking prompt continuation.
 4. **Character identity lock.** A source portrait is bound to the project or to a
-   shot and is attached to *both* stages. Qwen receives it as a still reference; H3
-   receives it as `<Picture 1>` in reference mode, ahead of the seam frame and your
-   other references. A head turn, a reverse angle or a new shot no longer means a new
-   face. Existing `<Picture N>` tags are renumbered automatically.
+   shot and is attached to *both* stages. Qwen receives it as a still reference; in
+   H3 reference mode the seam/start frame leads as `<Picture 1>` and the portrait
+   follows as `<Picture 2>` (identity only, never the shot's opening image). With no
+   seam, the portrait is `<Picture 1>`. A head turn, a reverse angle or a new shot no
+   longer means a new face. Existing `<Picture N>` tags are renumbered automatically.
 5. **Takes instead of throwaway renders.** Every still and video render becomes a take
    with its seed, prompt, graph and log. Compare variants, promote the best image to
    the Library, accept the best video, and export only accepted takes.
